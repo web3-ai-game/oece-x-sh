@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #=======================================================================
-#  oece-x.sh — VPS 體檢與一鍵部署測試工具
+#  oece-x.sh — VPS 體檢與運維精選工具箱
 #
 #  幫你在 3 分鐘內判斷一台 VPS 到底能不能用、值不值。
-#  系統體檢 · 網路測速 · 回程路由 · 環境安裝 · 部署 Demo · Sub2API
+#  體檢 · 測速 · 回程 · BBR · Docker · 反代 · Top3腳本 · 酷炫終端
 #
 #  Project : https://github.com/web3-ai-game/oece-x-sh
 #  Channel : YouTube @oece-x · https://oece-x.com
@@ -12,7 +12,7 @@
 #  本工具不含任何繞過網路封鎖之功能，僅供 VPS 測試與學習用途。
 #=======================================================================
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/oece-x.sh"
 
 set -Eeuo pipefail
@@ -26,17 +26,6 @@ OECE_DEMO_DIR="${OECE_HOME}/demo"
 DEMO_CONTAINER="oece-x-demo"
 DEMO_PORT_DEFAULT="8888"
 
-# Sub2API（官方 Docker Compose 一鍵部署封裝）
-# 上游: https://github.com/Wei-Shaw/sub2api
-# 安裝目錄刻意不用 /opt/sub2api，避免與本機已有 api.oece-x.com 實例衝突
-SUB2API_DIR_DEFAULT="/opt/oece-sub2api"
-SUB2API_PROJECT="oece-sub2api"
-SUB2API_PORT_DEFAULT="8080"
-SUB2API_GH_RAW="https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy"
-SUB2API_COMPOSE_URL="${SUB2API_GH_RAW}/docker-compose.local.yml"
-SUB2API_ENV_EXAMPLE_URL="${SUB2API_GH_RAW}/.env.example"
-SUB2API_CRED_FILE="${OECE_HOME}/sub2api-credentials.txt"
-SUB2API_DUCKDNS_FILE="${OECE_HOME}/duckdns.env"
 
 # NextTrace（開源回程路由工具）— 釘死版本 + 內嵌 SHA256 校驗
 # 來源: https://github.com/nxtrace/NTrace-core/releases
@@ -171,6 +160,8 @@ on_error() {
 trap 'on_error $LINENO $?' ERR
 
 on_exit() {
+    # 恢復游標（動畫可能隱藏）
+    printf '\033[?25h' 2>/dev/null || true
     rm -rf "$TMP_DIR" 2>/dev/null || true
 }
 trap on_exit EXIT
@@ -854,592 +845,677 @@ module_demo() {
 }
 
 
+
+
 #=======================================================================
-# 模塊 6 · Sub2API 傻瓜式部署
+# UI · 酷炫開場動畫 + 選單樣式
 #=======================================================================
-# 無域名默認 IP:端口；sslip.io 零申請偽域名；DuckDNS 半自動免費子域。
-# 不在生產機覆蓋 /opt/sub2api（本項目 api.oece-x.com 已佔用）。
-
-s2a_dir() {
-    printf '%s' "${SUB2API_DIR:-$SUB2API_DIR_DEFAULT}"
-}
-
-s2a_compose() {
-    # 統一 compose 入口：優先 docker compose 插件
-    if docker compose version >/dev/null 2>&1; then
-        docker compose -p "$SUB2API_PROJECT" -f "$(s2a_dir)/docker-compose.yml" "$@"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        docker-compose -p "$SUB2API_PROJECT" -f "$(s2a_dir)/docker-compose.yml" "$@"
-    else
-        err "未找到 docker compose / docker-compose"
-        return 1
-    fi
-}
-
-s2a_require_docker() {
-    if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-        warn "需要 Docker 運行環境。"
-        if confirm "現在安裝 Docker + Compose？"; then
-            install_docker || return 1
-        else
-            info "請先在「環境一鍵安裝」中安裝 Docker。"
-            return 1
-        fi
-    fi
-    if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-        warn "未檢出 Compose。"
-        if confirm "安裝 docker-compose-plugin？"; then
-            pkg_install docker-compose-plugin || return 1
-        else
-            return 1
-        fi
-    fi
+anim_enabled() {
+    [ -t 1 ] || return 1
+    [ -z "${OECE_NO_ANIM:-}" ] || return 1
+    [ -z "${OECE_FAST:-}" ] || return 1
     return 0
 }
 
-s2a_port_in_use() {
-    local port="$1"
-    if command -v ss >/dev/null 2>&1; then
-        ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$" && return 0
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$" && return 0
-    fi
-    return 1
+anim_sleep() {
+    # $1 seconds (float ok if sleep supports)
+    sleep "$1" 2>/dev/null || sleep 0
 }
 
-s2a_mem_mb() {
-    awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || printf '0'
-}
+intro_animation() {
+    anim_enabled || return 0
 
-# 按記憶體分檔：輸出 shared_buffers|effective_cache|max_open|max_idle|redis_pool|redis_min_idle|max_conn
-s2a_mem_profile() {
-    local mb
-    mb=$(s2a_mem_mb)
-    if [ "$mb" -lt 1800 ] 2>/dev/null; then
-        printf '128MB|512MB|32|16|128|8|100'
-    elif [ "$mb" -lt 3800 ] 2>/dev/null; then
-        printf '256MB|1GB|64|32|256|16|200'
-    elif [ "$mb" -lt 7800 ] 2>/dev/null; then
-        printf '512MB|2GB|128|64|1024|64|512'
-    else
-        printf '1GB|4GB|256|128|4096|256|1024'
-    fi
-}
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+    [ "$cols" -lt 40 ] && cols=80
 
-s2a_env_set() {
-    local file="$1" key="$2" val="$3"
-    if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        # 用 awk 覆寫，避免 sed 特殊字元問題
-        local tmp
-        tmp=$(mktemp)
-        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}' "$file" > "$tmp"
-        mv "$tmp" "$file"
-    else
-        printf '%s=%s\n' "$key" "$val" >> "$file"
-    fi
-}
+    printf '\033[?25l'   # hide cursor
+    printf '\033[2J\033[H'  # clear
 
-s2a_gen_secret() {
-    openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
-}
-
-s2a_gen_password() {
-    # URL/終端友好密碼（無易混淆字元）
-    openssl rand -base64 18 2>/dev/null | tr -d '/+=' | head -c 20
-}
-
-s2a_sslip_host() {
-    local ip="$1"
-    # 157.230.249.136 → 157-230-249-136.sslip.io
-    printf '%s.sslip.io' "$(printf '%s' "$ip" | tr '.' '-')"
-}
-
-s2a_is_installed() {
-    [ -f "$(s2a_dir)/docker-compose.yml" ] && [ -f "$(s2a_dir)/.env" ]
-}
-
-s2a_patch_compose_names() {
-    local f="$1"
-    # 避免與官方默認 container_name（sub2api*）及本機 api.oece-x.com 實例衝突
-    sed -i \
-        -e 's/container_name:[[:space:]]*sub2api-postgres/container_name: oece-sub2api-postgres/' \
-        -e 's/container_name:[[:space:]]*sub2api-redis/container_name: oece-sub2api-redis/' \
-        -e 's/container_name:[[:space:]]*sub2api$/container_name: oece-sub2api/' \
-        -e 's/container_name:[[:space:]]*sub2api[[:space:]]*$/container_name: oece-sub2api/' \
-        "$f"
-    # 網路名隔離
-    sed -i 's/sub2api-network/oece-sub2api-network/g' "$f"
-}
-
-s2a_detect_foreign_instance() {
-    # 提示本機可能已有非本腳本管理的 Sub2API
-    local found=0
-    if [ -d /opt/sub2api ] && [ "$(s2a_dir)" != "/opt/sub2api" ]; then
-        warn "偵測到 /opt/sub2api（可能是獨立部署，如 api.oece-x.com）。"
-        found=1
-    fi
-    if command -v docker >/dev/null 2>&1; then
-        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'sub2api'; then
-            warn "偵測到容器名 sub2api（非本腳本的 oece-sub2api 前綴）。"
-            found=1
-        fi
-    fi
-    if [ "$found" -eq 1 ]; then
-        info "本腳本安裝到 $(s2a_dir)，容器前綴 oece-sub2api，默認不會覆蓋上述實例。"
-        info "請務必選用空閒端口（若 8080 已被佔用會自動提示）。"
-        printf '\n'
-    fi
-}
-
-s2a_read_env() {
-    local key="$1" file
-    file="$(s2a_dir)/.env"
-    [ -f "$file" ] || return 0
-    awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$file"
-}
-
-s2a_print_access() {
-    local port bind ipv4 sslip
-    port=$(s2a_read_env SERVER_PORT)
-    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
-    bind=$(s2a_read_env BIND_HOST)
-    [ -z "$bind" ] && bind="0.0.0.0"
-    ipv4=$(get_public_ip 4)
-    [ -z "$ipv4" ] && ipv4="<公網IP>"
-
-    section "訪問地址"
-    kv "綁定" "${bind}:${port}"
-    kv "本機" "http://127.0.0.1:${port}"
-    if [ "$bind" = "127.0.0.1" ]; then
-        warn "目前僅本機可訪問。若需公網，請到子選單改綁 0.0.0.0，或自建反代。"
-    else
-        kv "公網 IP" "http://${ipv4}:${port}"
-        if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            sslip=$(s2a_sslip_host "$ipv4")
-            kv "sslip.io" "http://${sslip}:${port}"
-            kv "nip.io" "http://${ipv4}.nip.io:${port}"
-            info "sslip.io / nip.io 為零註冊偽域名（IP 寫進主機名），無需申請。"
-        fi
-    fi
-    if [ -f "$SUB2API_DUCKDNS_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$SUB2API_DUCKDNS_FILE" 2>/dev/null || true
-        if [ -n "${DUCKDNS_DOMAIN:-}" ]; then
-            kv "DuckDNS" "http://${DUCKDNS_DOMAIN}.duckdns.org:${port}"
-        fi
-    fi
-    printf '\n'
-    if [ -f "$SUB2API_CRED_FILE" ]; then
-        info "管理員帳密見：${SUB2API_CRED_FILE}"
-        # 僅展示郵箱，密碼不在狀態裡重複刷屏（安裝時已打印）
-        local email
-        email=$(awk -F= '/^ADMIN_EMAIL=/{print $2; exit}' "$SUB2API_CRED_FILE" 2>/dev/null || true)
-        [ -n "$email" ] && kv "管理員郵箱" "$email"
-    fi
-    info "若公網打不開：檢查雲廠商安全組 / ufw 是否放行 TCP ${port}。"
-}
-
-s2a_write_credentials() {
-    local email="$1" pass="$2" port="$3"
-    mkdir -p "$OECE_HOME"
-    umask 077
-    cat > "$SUB2API_CRED_FILE" <<EOF
-# oece-x.sh Sub2API credentials — $(date -Iseconds 2>/dev/null || date)
-# 請勿截圖發佈到公開頻道
-INSTALL_DIR=$(s2a_dir)
-ADMIN_EMAIL=${email}
-ADMIN_PASSWORD=${pass}
-SERVER_PORT=${port}
-EOF
-    chmod 600 "$SUB2API_CRED_FILE"
-}
-
-s2a_install() {
-    section "Sub2API 一鍵安裝"
-    s2a_require_docker || return 0
-    s2a_detect_foreign_instance
-
-    if s2a_is_installed; then
-        warn "已存在安裝目錄：$(s2a_dir)"
-        if ! confirm "重新生成配置並重裝容器？（數據目錄可選擇保留）"; then
-            info "已取消"
-            return 0
-        fi
-        if confirm "停止並移除現有 oece-sub2api 容器？"; then
-            s2a_compose down 2>/dev/null || true
-        fi
-    fi
-
-    local mem_mb profile
-    mem_mb=$(s2a_mem_mb)
-    profile=$(s2a_mem_profile)
-    info "偵測記憶體約 ${mem_mb} MB，將套用對應資源檔以適配小 VPS。"
-    if [ "$mem_mb" -gt 0 ] && [ "$mem_mb" -lt 1500 ]; then
-        warn "記憶體 < 1.5GB，Sub2API（含 Postgres+Redis）可能吃緊，建議 ≥2GB。"
-        confirm "仍要繼續？" || { info "已取消"; return 0; }
-    fi
-
-    local port
-    printf '請輸入對外端口 [%s]: ' "$SUB2API_PORT_DEFAULT"
-    read -r port || port=""
-    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
-    case "$port" in
-        ''|*[!0-9]*) err "端口必須是數字"; return 1 ;;
-    esac
-    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        err "端口範圍 1-65535"
-        return 1
-    fi
-    if s2a_port_in_use "$port"; then
-        err "端口 ${port} 已被佔用。若本機已有 api 反代/Sub2API，請換端口（如 18080）。"
-        return 1
-    fi
-
-    local email pass
-    printf '管理員郵箱 [%s]: ' "admin@localhost"
-    read -r email || email=""
-    [ -z "$email" ] && email="admin@localhost"
-    pass=$(s2a_gen_password)
-    [ -z "$pass" ] && pass=$(s2a_gen_secret | head -c 16)
-
-    local dir
-    dir=$(s2a_dir)
-    mkdir -p "$dir" "$dir/data" "$dir/postgres_data" "$dir/redis_data"
-
-    info "下載官方 docker-compose 與 .env 模板..."
-    safe_download "$SUB2API_COMPOSE_URL" "${dir}/docker-compose.yml" || return 1
-    safe_download "$SUB2API_ENV_EXAMPLE_URL" "${dir}/.env.example" || return 1
-    s2a_patch_compose_names "${dir}/docker-compose.yml"
-
-    cp "${dir}/.env.example" "${dir}/.env"
-    chmod 600 "${dir}/.env"
-
-    local jwt totp pgpass
-    jwt=$(s2a_gen_secret)
-    totp=$(s2a_gen_secret)
-    pgpass=$(s2a_gen_secret)
-
-    local sb ecache mop mid rpool rmin pmax
-    IFS='|' read -r sb ecache mop mid rpool rmin pmax <<< "$profile"
-
-    s2a_env_set "${dir}/.env" "BIND_HOST" "0.0.0.0"
-    s2a_env_set "${dir}/.env" "SERVER_PORT" "$port"
-    s2a_env_set "${dir}/.env" "ADMIN_EMAIL" "$email"
-    s2a_env_set "${dir}/.env" "ADMIN_PASSWORD" "$pass"
-    s2a_env_set "${dir}/.env" "JWT_SECRET" "$jwt"
-    s2a_env_set "${dir}/.env" "TOTP_ENCRYPTION_KEY" "$totp"
-    s2a_env_set "${dir}/.env" "POSTGRES_PASSWORD" "$pgpass"
-    s2a_env_set "${dir}/.env" "POSTGRES_SHARED_BUFFERS" "$sb"
-    s2a_env_set "${dir}/.env" "POSTGRES_EFFECTIVE_CACHE_SIZE" "$ecache"
-    s2a_env_set "${dir}/.env" "POSTGRES_MAX_CONNECTIONS" "$pmax"
-    s2a_env_set "${dir}/.env" "DATABASE_MAX_OPEN_CONNS" "$mop"
-    s2a_env_set "${dir}/.env" "DATABASE_MAX_IDLE_CONNS" "$mid"
-    s2a_env_set "${dir}/.env" "REDIS_POOL_SIZE" "$rpool"
-    s2a_env_set "${dir}/.env" "REDIS_MIN_IDLE_CONNS" "$rmin"
-    s2a_env_set "${dir}/.env" "TZ" "Asia/Shanghai"
-
-    s2a_write_credentials "$email" "$pass" "$port"
-
-    info "拉取鏡像並啟動（首次可能需數分鐘）..."
-    if ! ( cd "$dir" && s2a_compose pull ); then
-        err "鏡像拉取失敗，請檢查網路（需能訪問 Docker Hub / ghcr 鏡像源）。"
-        return 1
-    fi
-    if ! ( cd "$dir" && s2a_compose up -d ); then
-        err "啟動失敗，請執行：cd ${dir} && docker compose -p ${SUB2API_PROJECT} logs"
-        return 1
-    fi
-
-    info "等待健康檢查（最長約 120 秒）..."
-    local http_code=000
-    for _ in $(seq 1 40); do
-        http_code=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "http://127.0.0.1:${port}/health" 2>/dev/null) || http_code="000"
-        if [ "$http_code" = "200" ]; then
-            break
-        fi
-        # 首頁 200/302 也算起來了
-        http_code=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null) || http_code="000"
-        case "$http_code" in
-            200|301|302|303|307|308) break ;;
-        esac
-        sleep 3
+    # --- 矩陣雨短段 ---
+    local r c ch colors
+    colors=("$C_CYAN" "$C_MAGENTA" "$C_GREEN" "$C_BLUE")
+    for r in 1 2 3 4 5 6 7 8; do
+        printf '\033[H'
+        local line="" i
+        for i in $(seq 1 "$cols"); do
+            if [ $((RANDOM % 5)) -eq 0 ]; then
+                ch=$((RANDOM % 2))
+                line+="${colors[$((RANDOM % 4))]}${ch}${C_RESET}"
+            else
+                line+=" "
+            fi
+        done
+        # 簡化：每行固定寬隨機 01
+        printf '%s' "${colors[$((r % 4))]}"
+        tr -dc '01 ' </dev/urandom 2>/dev/null | head -c "$cols" || true
+        printf '%s\n' "$C_RESET"
+        anim_sleep 0.04
     done
 
-    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ] \
-        || [ "$http_code" = "303" ] || [ "$http_code" = "307" ] || [ "$http_code" = "308" ]; then
-        ok "Sub2API 已啟動（HTTP ${http_code}）"
+    printf '\033[2J\033[H'
+
+    # --- Logo 逐行 + 掃描高亮 ---
+    local logo_file="${TMP_DIR}/logo.txt"
+    cat > "$logo_file" <<'LOGO'
+   ____  ______ ____ ______      __  __
+  / __ \|  ____/ ___|  ____|     \ \/ /
+ | |  | | |__ | |   | |__   _____ \  /
+ | |  | |  __|| |   |  __| |_____|/  \
+ | |__| | |___| |___| |____      /  /\ \
+  \____/|______\____|______|    /__/  \_\
+LOGO
+    local n
+    n=$(wc -l < "$logo_file")
+    local line
+    while IFS= read -r line; do
+        printf '%s%s%s\n' "$C_MAGENTA" "$C_BOLD" "$line"
+        printf '%s' "$C_RESET"
+        anim_sleep 0.055
+    done < "$logo_file"
+
+    # 掃描線覆寫高亮
+    printf '\033[%dA' "$n"
+    while IFS= read -r line; do
+        printf '\033[2K\r'
+        printf '%s%s%s\n' "$C_CYAN" "$C_BOLD" "$line"
+        printf '%s' "$C_RESET"
+        anim_sleep 0.045
+        printf '\033[2K\r'
+        printf '%s%s%s\n' "$C_MAGENTA" "$C_BOLD" "$line"
+        printf '%s' "$C_RESET"
+    done < "$logo_file"
+
+    # --- 真信息進度條 ---
+    local steps=(
+        "kernel:$(uname -r 2>/dev/null || echo '?')"
+        "arch:${ARCH:-?}"
+        "os:${OS_ID:-linux}"
+        "ready:v${SCRIPT_VERSION}"
+    )
+    local s bar filled i total=${#steps[@]}
+    printf '\n'
+    for i in "${!steps[@]}"; do
+        s="${steps[$i]}"
+        filled=$(( (i + 1) * 10 / total ))
+        bar=$(printf '%*s' "$filled" '' | tr ' ' '█')
+        bar+=$(printf '%*s' $((10 - filled)) '' | tr ' ' '░')
+        printf '\r  %s[%s]%s %s%-40s%s' "$C_CYAN" "$bar" "$C_RESET" "$C_DIM" "$s" "$C_RESET"
+        anim_sleep 0.12
+    done
+    printf '\n\n'
+
+    # 打字機副標題
+    local tag="  oece-x.sh v${SCRIPT_VERSION} · YouTube @oece-x · oece-x.com"
+    local j
+    printf '%s' "$C_DIM"
+    for ((j=0; j<${#tag}; j++)); do
+        printf '%s' "${tag:$j:1}"
+        anim_sleep 0.012
+    done
+    printf '%s\n' "$C_RESET"
+    anim_sleep 0.25
+    printf '\033[?25h'
+}
+
+menu_group() {
+    printf '%s── %s %s\n' "$C_DIM" "$*" "───────────────────────────────────$C_RESET"
+}
+
+menu_item() {
+    # menu_item NUM "label" ["hint"] [star]
+    local num="$1" label="$2" hint="${3:-}" star="${4:-}"
+    local star_s=""
+    [ "$star" = "1" ] && star_s="${C_YELLOW}★${C_RESET}"
+    if [ -n "$hint" ]; then
+        printf ' %s%2s)%s  %s%-16s%s %s%s%s %s\n' \
+            "$C_CYAN" "$num" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$C_DIM" "$hint" "$C_RESET" "$star_s"
     else
-        warn "容器已啟動但健康檢查超時（HTTP ${http_code}）。可稍後在「狀態/日誌」查看。"
-        warn "常見原因：鏡像拉取慢、磁碟慢、記憶體不足。"
+        printf ' %s%2s)%s  %s%s%s %s\n' \
+            "$C_CYAN" "$num" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$star_s"
     fi
-
-    printf '\n'
-    ok "安裝完成"
-    kv "安裝目錄" "$dir"
-    kv "管理員郵箱" "$email"
-    kv "管理員密碼" "$pass"
-    kv "憑證檔案" "$SUB2API_CRED_FILE"
-    printf '\n'
-    s2a_print_access
-    warn "請立即保存管理員密碼；完整密鑰在 ${dir}/.env（chmod 600）。"
-    info "上游項目：https://github.com/Wei-Shaw/sub2api"
 }
 
-s2a_status() {
-    section "Sub2API 狀態"
-    if ! s2a_is_installed; then
-        warn "尚未通過本腳本安裝（目錄 $(s2a_dir) 不完整）。"
-        s2a_detect_foreign_instance
-        return 0
-    fi
-    s2a_require_docker || return 0
-    s2a_compose ps 2>/dev/null || docker ps -a --filter "name=oece-sub2api" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-    printf '\n'
-    s2a_print_access
+#=======================================================================
+# 系統運維：更新 / 清理 / BBR / Swap / 時區DNS
+#=======================================================================
+module_sys_update() {
+    section "系統更新"
+    case "$PKG_MGR" in
+        apt)
+            info "將執行：apt-get update && apt-get upgrade -y"
+            confirm "繼續？" || { info "已取消"; return 0; }
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+            ok "系統更新完成"
+            ;;
+        dnf)
+            confirm "執行 dnf upgrade -y？" || { info "已取消"; return 0; }
+            dnf upgrade -y
+            ok "系統更新完成"
+            ;;
+        yum)
+            confirm "執行 yum update -y？" || { info "已取消"; return 0; }
+            yum update -y
+            ok "系統更新完成"
+            ;;
+        *) err "未知包管理器"; return 1 ;;
+    esac
 }
 
-s2a_logs() {
-    section "Sub2API 日誌"
-    s2a_is_installed || { warn "未安裝"; return 0; }
-    s2a_require_docker || return 0
-    info "顯示最近 80 行（Ctrl+C 不影響服務）..."
-    s2a_compose logs --tail=80 sub2api 2>/dev/null || s2a_compose logs --tail=80
-}
-
-s2a_update() {
-    section "更新 Sub2API 鏡像"
-    s2a_is_installed || { warn "未安裝"; return 0; }
-    s2a_require_docker || return 0
-    confirm "拉取 latest 並重啟容器？" || { info "已取消"; return 0; }
-    s2a_compose pull && s2a_compose up -d
-    ok "更新流程已執行"
-    s2a_print_access
-}
-
-s2a_rebind() {
-    section "修改綁定 / 端口"
-    s2a_is_installed || { warn "未安裝"; return 0; }
-    s2a_require_docker || return 0
-
-    local cur_bind cur_port new_bind new_port
-    cur_bind=$(s2a_read_env BIND_HOST)
-    cur_port=$(s2a_read_env SERVER_PORT)
-    [ -z "$cur_bind" ] && cur_bind="0.0.0.0"
-    [ -z "$cur_port" ] && cur_port="$SUB2API_PORT_DEFAULT"
-    info "當前：${cur_bind}:${cur_port}"
-    printf ' 1) 公網可訪 0.0.0.0（無域名直連）\n'
-    printf ' 2) 僅本機 127.0.0.1（配合 nginx/Caddy 反代）\n'
-    printf ' 3) 只改端口\n'
+module_sys_clean() {
+    section "系統清理"
+    printf ' 1) 包管理器緩存清理\n'
+    printf ' 2) journal 日誌（保留 3 天）\n'
+    printf ' 3) 臨時目錄 /tmp 內 7 天前檔案（謹慎）\n'
+    printf ' 4) 全部執行（1+2）\n'
     printf ' 0) 返回\n\n請選擇: '
     local c
     read -r c || c="0"
-    new_bind="$cur_bind"
-    new_port="$cur_port"
     case "$c" in
-        1) new_bind="0.0.0.0" ;;
-        2) new_bind="127.0.0.1" ;;
-        3) : ;;
+        1|4)
+            case "$PKG_MGR" in
+                apt) apt-get autoremove -y 2>/dev/null || true; apt-get clean 2>/dev/null || true; ok "apt 清理完成" ;;
+                dnf) dnf clean all 2>/dev/null || true; ok "dnf 清理完成" ;;
+                yum) yum clean all 2>/dev/null || true; ok "yum 清理完成" ;;
+            esac
+            ;;&
+        2|4)
+            if command -v journalctl >/dev/null 2>&1; then
+                journalctl --vacuum-time=3d 2>/dev/null || true
+                ok "journal 已限制保留 3 天"
+            else
+                warn "無 journalctl"
+            fi
+            ;;&
+        3)
+            confirm_danger "將刪除 /tmp 下 7 天未訪問的普通檔案（不跟目錄）" || { info "已取消"; return 0; }
+            find /tmp -mindepth 1 -mtime +7 -type f -delete 2>/dev/null || true
+            ok "/tmp 舊檔清理完成"
+            ;;
+        0) return 0 ;;
+        *) warn "無效選項" ;;
+    esac
+}
+
+module_bbr() {
+    section "BBR / TCP 擁塞控制"
+    local cc qdisc
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')
+    kv "當前擁塞控制" "$cc"
+    kv "默認隊列" "$qdisc"
+    # 是否可用 bbr
+    if [ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]; then
+        kv "可用算法" "$(cat /proc/sys/net/ipv4/tcp_available_congestion_control)"
+    fi
+    printf '\n'
+    printf ' 1) 啟用 BBR（fq + bbr，寫入 sysctl.d）★\n'
+    printf ' 2) 僅查看狀態\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+                err "內核未提供 bbr（需較新內核）。可用算法見上。"
+                return 0
+            fi
+            confirm "寫入 /etc/sysctl.d/99-oece-bbr.conf 並立即生效？" || { info "已取消"; return 0; }
+            cat > /etc/sysctl.d/99-oece-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+            sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-oece-bbr.conf >/dev/null 2>&1 || true
+            sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+            ok "BBR 已嘗試啟用：$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+            kv "隊列" "$(sysctl -n net.core.default_qdisc 2>/dev/null)"
+            ;;
+        2) : ;;
         *) return 0 ;;
     esac
-    printf '端口 [%s]: ' "$cur_port"
-    read -r new_port || new_port=""
-    [ -z "$new_port" ] && new_port="$cur_port"
-    case "$new_port" in
-        ''|*[!0-9]*) err "端口無效"; return 1 ;;
-    esac
-    if [ "$new_port" != "$cur_port" ] && s2a_port_in_use "$new_port"; then
-        err "端口 ${new_port} 已被佔用"
-        return 1
-    fi
-    s2a_env_set "$(s2a_dir)/.env" "BIND_HOST" "$new_bind"
-    s2a_env_set "$(s2a_dir)/.env" "SERVER_PORT" "$new_port"
-    if [ -f "$SUB2API_CRED_FILE" ]; then
-        s2a_env_set "$SUB2API_CRED_FILE" "SERVER_PORT" "$new_port" 2>/dev/null || true
-    fi
-    info "重啟容器使配置生效..."
-    s2a_compose up -d
-    ok "已更新為 ${new_bind}:${new_port}"
-    s2a_print_access
 }
 
-s2a_duckdns_setup() {
-    section "DuckDNS 免費子域名"
-    info "DuckDNS 提供免費 *.duckdns.org 子域（需免費帳號，非全自動搶註）。"
-    info "步驟：瀏覽器打開 https://www.duckdns.org → 登入 → 建立 subdomain → 複製 token"
+module_swap() {
+    section "Swap 虛擬記憶體"
+    free -h 2>/dev/null || true
+    swapon --show 2>/dev/null || true
     printf '\n'
-    local domain token ip
-    printf '子域名（不含 .duckdns.org）: '
-    read -r domain || domain=""
-    domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
-    if [ -z "$domain" ]; then
-        err "子域名無效"
-        return 1
-    fi
-    printf 'DuckDNS token: '
-    read -r token || token=""
-    if [ -z "$token" ]; then
-        err "token 不能為空"
-        return 1
-    fi
-    ip=$(get_public_ip 4)
-    if [ -z "$ip" ]; then
-        err "無法取得公網 IP"
-        return 1
-    fi
-    info "更新 ${domain}.duckdns.org → ${ip} ..."
-    local resp
-    resp=$(curl -fsS --max-time 15 \
-        "https://www.duckdns.org/update?domains=${domain}&token=${token}&ip=${ip}" 2>/dev/null) || resp="fail"
-    if [ "$resp" = "OK" ]; then
-        ok "DuckDNS 更新成功"
-    else
-        err "DuckDNS 更新失敗（回應: ${resp}）。請檢查 token / 子域名是否正確。"
-        return 1
-    fi
-
-    mkdir -p "$OECE_HOME"
-    umask 077
-    cat > "$SUB2API_DUCKDNS_FILE" <<EOF
-# managed by oece-x.sh
-DUCKDNS_DOMAIN=${domain}
-DUCKDNS_TOKEN=${token}
-EOF
-    chmod 600 "$SUB2API_DUCKDNS_FILE"
-
-    # 可選：systemd timer 或 cron 保活動態 IP
-    if confirm "安裝每 5 分鐘自動更新 IP 的 cron？（適合動態公網 IP）"; then
-        local cron_line
-        cron_line="*/5 * * * * root curl -fsS \"https://www.duckdns.org/update?domains=${domain}&token=${token}&ip=\" >/dev/null 2>&1"
-        if [ -d /etc/cron.d ]; then
-            printf '%s\n' "$cron_line" > /etc/cron.d/oece-duckdns
-            chmod 644 /etc/cron.d/oece-duckdns
-            ok "已寫入 /etc/cron.d/oece-duckdns"
-        else
-            warn "無 /etc/cron.d，請手動添加 cron：${cron_line}"
-        fi
-    fi
-
-    local port
-    port=$(s2a_read_env SERVER_PORT)
-    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
-    kv "訪問" "http://${domain}.duckdns.org:${port}"
-    info "DNS 全球生效通常 < 1 分鐘。HTTPS 請自行用 Caddy/certbot（本版不做一鍵簽章）。"
-}
-
-s2a_access_menu() {
-    section "訪問方式（無域名友好）"
-    if s2a_is_installed; then
-        s2a_print_access
-    else
-        warn "尚未安裝 Sub2API；仍可先配置 DuckDNS 或查看偽域名說明。"
-        local ipv4
-        ipv4=$(get_public_ip 4)
-        if [[ "${ipv4}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            kv "sslip.io 示例" "http://$(s2a_sslip_host "$ipv4"):8080"
-        fi
-    fi
-    printf '\n'
-    printf ' 1) 重新顯示 IP / sslip.io / nip.io 地址\n'
-    printf ' 2) 配置 DuckDNS 免費子域名（需 token）\n'
-    printf ' 3) 自有域名指引（不改本機 nginx）\n'
+    printf ' 1) 建立 / 調整 swap 檔（默認 1G / 2G）\n'
+    printf ' 2) 關閉並刪除 /swapfile（若存在）\n'
     printf ' 0) 返回\n\n請選擇: '
     local c
     read -r c || c="0"
     case "$c" in
-        1) s2a_print_access ;;
-        2) s2a_duckdns_setup ;;
-        3)
-            section "自有域名指引"
-            local ip port
-            ip=$(get_public_ip 4)
-            port=$(s2a_read_env SERVER_PORT)
-            [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
-            info "1. 在域名 DNS 添加 A 記錄指向 ${ip:-\<公網IP\>}"
-            info "2. 建議用 Caddy / nginx 反代到 127.0.0.1:${port}，並將 BIND 改為 127.0.0.1"
-            printf '\n示例 Caddyfile：\n'
-            cat <<EOF
-api.example.com {
-    reverse_proxy 127.0.0.1:${port}
-}
-EOF
-            printf '\n示例 nginx：\n'
-            cat <<EOF
-server {
-    listen 443 ssl http2;
-    server_name api.example.com;
-    # ssl_certificate ...;
-    location / {
-        proxy_pass http://127.0.0.1:${port};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-            info "本腳本不會自動修改系統 nginx，避免誤傷其他站點。"
+        1)
+            local size_gb=1
+            printf '大小 GB [1]: '
+            read -r size_gb || size_gb=1
+            [ -z "$size_gb" ] && size_gb=1
+            case "$size_gb" in *[!0-9]*|"") err "請輸入正整數 GB"; return 1 ;; esac
+            confirm "建立 ${size_gb}G swap 於 /swapfile？" || { info "已取消"; return 0; }
+            if swapon --show 2>/dev/null | grep -q '/swapfile'; then
+                swapoff /swapfile 2>/dev/null || true
+            fi
+            rm -f /swapfile
+            # fallocate 或 dd
+            if fallocate -l "${size_gb}G" /swapfile 2>/dev/null; then
+                :
+            else
+                dd if=/dev/zero of=/swapfile bs=1M count=$((size_gb * 1024)) status=progress
+            fi
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            if ! grep -q '^/swapfile' /etc/fstab 2>/dev/null; then
+                echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            fi
+            ok "Swap 已啟用"
+            free -h
+            ;;
+        2)
+            confirm_danger "關閉並刪除 /swapfile" || { info "已取消"; return 0; }
+            swapoff /swapfile 2>/dev/null || true
+            rm -f /swapfile
+            if [ -f /etc/fstab ]; then
+                sed -i '\#^/swapfile#d' /etc/fstab
+            fi
+            ok "已移除 /swapfile"
             ;;
         *) return 0 ;;
     esac
 }
 
-s2a_uninstall() {
-    section "卸載 Sub2API（僅本腳本實例）"
-    if ! s2a_is_installed && ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^oece-sub2api'; then
-        info "未發現 oece-sub2api 實例。"
-        return 0
-    fi
-    info "將操作："
-    printf '  · compose project %s\n' "$SUB2API_PROJECT"
-    printf '  · 目錄 %s\n' "$(s2a_dir)"
-    printf '  %s不會動 /opt/sub2api 或容器名 sub2api（其他實例）%s\n\n' "$C_DIM" "$C_RESET"
-    confirm_danger "確認卸載本腳本部署的 Sub2API？" || { info "已取消"; return 0; }
-
-    if s2a_is_installed; then
-        s2a_compose down 2>/dev/null || true
-    fi
-    docker rm -f oece-sub2api oece-sub2api-postgres oece-sub2api-redis 2>/dev/null || true
-
-    if confirm "同時刪除數據目錄 $(s2a_dir)？（含數據庫，不可恢復）"; then
-        rm -rf "$(s2a_dir)"
-        ok "已刪除 $(s2a_dir)"
-    else
-        ok "容器已停，數據目錄保留"
-    fi
-    if [ -f "$SUB2API_CRED_FILE" ] && confirm "刪除憑證檔 ${SUB2API_CRED_FILE}？"; then
-        rm -f "$SUB2API_CRED_FILE"
-    fi
-    ok "卸載流程結束"
-}
-
-module_sub2api() {
-    section "部署 Sub2API（AI API 中轉 · 無域名友好）"
-    info "上游開源：Wei-Shaw/sub2api · Docker Compose 一鍵封裝"
-    info "安裝路徑默認 ${SUB2API_DIR_DEFAULT}（隔離前綴 oece-sub2api）"
-    printf '\n'
-    printf ' 1) 一鍵安裝 / 重裝\n'
-    printf ' 2) 訪問方式（IP / sslip.io / DuckDNS）\n'
-    printf ' 3) 狀態 / 帳號與地址\n'
-    printf ' 4) 日誌\n'
-    printf ' 5) 更新鏡像\n'
-    printf ' 6) 修改綁定與端口\n'
-    printf ' 7) 卸載本腳本實例\n'
-    printf ' 0) 返回\n\n'
-    printf '請選擇: '
-    local choice
-    read -r choice || choice="0"
-    case "$choice" in
-        1) printf '\n'; s2a_install ;;
-        2) printf '\n'; s2a_access_menu ;;
-        3) printf '\n'; s2a_status ;;
-        4) printf '\n'; s2a_logs ;;
-        5) printf '\n'; s2a_update ;;
-        6) printf '\n'; s2a_rebind ;;
-        7) printf '\n'; s2a_uninstall ;;
+module_tz_dns() {
+    section "時區 / DNS"
+    printf ' 1) 設定時區（timedatectl）\n'
+    printf ' 2) 優化 DNS（寫入 systemd-resolved 或 /etc/resolv.conf 提示）\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            if command -v timedatectl >/dev/null 2>&1; then
+                kv "當前" "$(timedatectl show -p Timezone --value 2>/dev/null || timedatectl | awk '/Time zone/{print $3}')"
+                printf '輸入時區（如 Asia/Shanghai）: '
+                local tz
+                read -r tz || tz=""
+                [ -z "$tz" ] && { info "已取消"; return 0; }
+                if timedatectl set-timezone "$tz"; then
+                    ok "時區已設為 $tz"
+                else
+                    err "設定失敗"
+                fi
+            else
+                warn "無 timedatectl，請手動 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime"
+            fi
+            ;;
+        2)
+            info "推薦公共 DNS：1.1.1.1 / 8.8.8.8 / 223.5.5.5（阿里）"
+            printf ' 1) Cloudflare 1.1.1.1 + 1.0.0.1\n'
+            printf ' 2) Google 8.8.8.8 + 8.8.4.4\n'
+            printf ' 3) 阿里 223.5.5.5 + 223.6.6.6\n'
+            printf ' 0) 取消\n請選擇: '
+            local d dns1 dns2
+            read -r d || d="0"
+            case "$d" in
+                1) dns1=1.1.1.1; dns2=1.0.0.1 ;;
+                2) dns1=8.8.8.8; dns2=8.8.4.4 ;;
+                3) dns1=223.5.5.5; dns2=223.6.6.6 ;;
+                *) return 0 ;;
+            esac
+            confirm "寫入 DNS ${dns1} ${dns2}？（可能被 cloud-init 覆蓋）" || return 0
+            if [ -d /etc/systemd/resolved.conf.d ]; then
+                mkdir -p /etc/systemd/resolved.conf.d
+                cat > /etc/systemd/resolved.conf.d/99-oece-dns.conf <<EOF
+[Resolve]
+DNS=${dns1} ${dns2}
+FallbackDNS=1.1.1.1
+EOF
+                systemctl restart systemd-resolved 2>/dev/null || true
+                ok "已寫入 systemd-resolved drop-in"
+            else
+                cp -a /etc/resolv.conf "/etc/resolv.conf.bak.$(date +%s)" 2>/dev/null || true
+                cat > /etc/resolv.conf <<EOF
+nameserver ${dns1}
+nameserver ${dns2}
+EOF
+                ok "已寫入 /etc/resolv.conf（已備份）"
+            fi
+            ;;
         *) return 0 ;;
     esac
-    disclaimer
 }
+
+
+#=======================================================================
+# 全網 Top3 漢化 VPS 腳本入口（第三方 · 僅作啟動器）
+# GitHub stars 約：LinuxMirrors > 融合怪 ecs > kejilion（2026 量級）
+#=======================================================================
+# 合規：我們不內嵌其源碼；下載後 bash -n 再執行；用戶二次確認。
+# 第三方腳本可能含我們刻意不做的功能（如 WARP），請自行甄別。
+
+run_remote_script() {
+    local name="$1" url="$2" extra_args="${3:-}"
+    local dest safe_name
+    safe_name=$(printf '%s' "$name" | tr -cd 'a-zA-Z0-9._-')
+    dest="${TMP_DIR}/ext-${safe_name}.sh"
+
+    section "啟動第三方腳本：${name}"
+    info "來源（HTTPS）: ${url}"
+    warn "此為外部開源項目，行為由其作者負責；本工具僅作便捷入口。"
+    warn "執行後將進入對方交互界面；退出後返回 oece-x 選單。"
+    confirm_danger "確認下載並執行「${name}」？" || { info "已取消"; return 0; }
+
+    safe_download "$url" "$dest" || return 1
+    if ! bash -n "$dest" 2>/dev/null; then
+        err "遠端腳本語法校驗失敗，拒絕執行。"
+        rm -f "$dest"
+        return 1
+    fi
+    chmod +x "$dest"
+    info "語法校驗通過，開始執行…"
+    printf '\n'
+    # 對方腳本可能自帶 set -e；用獨立 bash 進程隔離
+    # shellcheck disable=SC2086
+    if [ -n "$extra_args" ]; then
+        bash "$dest" $extra_args || warn "「${name}」退出碼非 0（可能是用戶取消）"
+    else
+        bash "$dest" || warn "「${name}」退出碼非 0（可能是用戶取消）"
+    fi
+    printf '\n'
+    ok "已返回 oece-x.sh"
+}
+
+module_script_hub() {
+    section "全網 Top3 · 漢化 VPS 腳本入口"
+    info "按 GitHub 熱度 + 中文界面 +「有 VPS 就能 curl 裝」篩選（非付費推廣）。"
+    printf '\n'
+    printf ' %s1)%s  %sLinuxMirrors 換源 / Docker 源%s  %s★ 約 7.6k stars%s\n' \
+        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    printf '     %sSuperManito/LinuxMirrors · 一鍵換軟體源、裝 Docker 換源%s\n' "$C_DIM" "$C_RESET"
+    printf '     %sbash <(curl -sSL https://linuxmirrors.cn/main.sh)%s\n' "$C_DIM" "$C_RESET"
+    printf '\n'
+    printf ' %s2)%s  %s融合怪 ecs 伺服器測評%s  %s★ 約 7.0k stars%s\n' \
+        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    printf '     %sspiritLHLS/ecs · 性能/流媒體/回程等綜合測評（中文菜單）%s\n' "$C_DIM" "$C_RESET"
+    printf '     %sGitHub raw ecs.sh%s\n' "$C_DIM" "$C_RESET"
+    printf '\n'
+    printf ' %s3)%s  %skejilion 科技 lion 工具箱%s  %s★ 約 3.0k stars%s\n' \
+        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    printf '     %skejilion/sh · 全能運維（繁中 tw 版）；含我們不做的模塊請自行跳過%s\n' "$C_DIM" "$C_RESET"
+    printf '     %sGitHub tw/kejilion.sh%s\n' "$C_DIM" "$C_RESET"
+    printf '\n'
+    printf ' %s4)%s  %s僅顯示官方一鍵命令（不執行）%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf ' %s0)%s  返回\n\n' "$C_CYAN" "$C_RESET"
+    printf '請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            run_remote_script "LinuxMirrors" "https://linuxmirrors.cn/main.sh"
+            ;;
+        2)
+            # 官方 README 主推 GitHub raw；失敗可讓用戶自備鏡像
+            run_remote_script "融合怪-ecs" "https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh"
+            ;;
+        3)
+            run_remote_script "kejilion-tw" "https://raw.githubusercontent.com/kejilion/sh/main/tw/kejilion.sh"
+            ;;
+        4)
+            section "官方一鍵命令（複製即用）"
+            printf '\n%s# 1. LinuxMirrors%s\n' "$C_GREEN" "$C_RESET"
+            printf 'bash <(curl -sSL https://linuxmirrors.cn/main.sh)\n'
+            printf 'bash <(curl -sSL https://linuxmirrors.cn/docker.sh)   # 僅 Docker\n'
+            printf '\n%s# 2. 融合怪 ecs%s\n' "$C_GREEN" "$C_RESET"
+            printf 'curl -L https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh -o ecs.sh && chmod +x ecs.sh && bash ecs.sh\n'
+            printf '# 或: bash <(wget -qO- bash.spiritlhl.net/ecs)\n'
+            printf '\n%s# 3. kejilion（繁中）%s\n' "$C_GREEN" "$C_RESET"
+            printf 'bash <(curl -sL kejilion.sh) tw\n'
+            printf '\n%s項目主頁:%s\n' "$C_DIM" "$C_RESET"
+            printf '  https://github.com/SuperManito/LinuxMirrors\n'
+            printf '  https://github.com/spiritLHLS/ecs\n'
+            printf '  https://github.com/kejilion/sh\n'
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+#=======================================================================
+# Docker 精簡管理
+#=======================================================================
+module_docker_hub() {
+    section "Docker 環境"
+    printf ' 1) 安裝 / 檢測 Docker + Compose ★\n'
+    printf ' 2) 全域狀態（版本 · 容器 · 鏡像數）\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1) install_docker ;;
+        2)
+            if ! command -v docker >/dev/null 2>&1; then
+                warn "未安裝 Docker"; return 0
+            fi
+            docker version 2>/dev/null | head -20 || true
+            docker compose version 2>/dev/null || true
+            printf '\n'
+            kv "容器" "$(docker ps -aq 2>/dev/null | wc -l) 個（運行 $(docker ps -q 2>/dev/null | wc -l)）"
+            kv "鏡像" "$(docker images -q 2>/dev/null | wc -l) 個"
+            kv "磁碟" "$(docker system df 2>/dev/null | head -5 | tr '\n' ' ')"
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+module_docker_ps() {
+    section "容器管理"
+    if ! command -v docker >/dev/null 2>&1; then
+        warn "請先安裝 Docker（選單 10）"
+        return 0
+    fi
+    docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || docker ps -a
+    printf '\n'
+    printf ' 1) 啟動  2) 停止  3) 重啟  4) 日誌  5) 刪除容器\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c name
+    read -r c || c="0"
+    case "$c" in
+        1|2|3|4|5)
+            printf '容器名或 ID: '
+            read -r name || name=""
+            [ -z "$name" ] && { warn "空"; return 0; }
+            ;;
+        *) return 0 ;;
+    esac
+    case "$c" in
+        1) docker start "$name" && ok "已啟動 $name" ;;
+        2) docker stop "$name" && ok "已停止 $name" ;;
+        3) docker restart "$name" && ok "已重啟 $name" ;;
+        4) docker logs --tail 100 "$name" ;;
+        5)
+            confirm_danger "刪除容器 $name（不刪卷）" || return 0
+            docker rm -f "$name" && ok "已刪除"
+            ;;
+    esac
+}
+
+module_docker_prune() {
+    section "Docker 清理"
+    if ! command -v docker >/dev/null 2>&1; then
+        warn "未安裝 Docker"; return 0
+    fi
+    docker system df 2>/dev/null || true
+    printf '\n'
+    confirm_danger "執行 docker system prune -af（刪未用容器/網路/鏡像，保留卷）？" || { info "已取消"; return 0; }
+    docker system prune -af
+    ok "清理完成"
+    docker system df 2>/dev/null || true
+}
+
+#=======================================================================
+# nginx 反代 + SSL 輔助
+#=======================================================================
+module_nginx_proxy() {
+    section "一鍵 nginx 反向代理"
+    info "將寫入獨立 conf，默認不覆蓋現有站點；套用前 nginx -t。"
+    if ! command -v nginx >/dev/null 2>&1; then
+        warn "未檢測到 nginx"
+        confirm "使用包管理器安裝 nginx？" || return 0
+        pkg_install nginx
+        systemctl enable --now nginx 2>/dev/null || true
+    fi
+
+    local domain upstream confdir conf
+    printf '域名（server_name，如 app.example.com）: '
+    read -r domain || domain=""
+    [ -z "$domain" ] && { err "域名不能為空"; return 1; }
+    printf '上游（如 127.0.0.1:8080）: '
+    read -r upstream || upstream=""
+    [ -z "$upstream" ] && { err "上游不能為空"; return 1; }
+
+    if [ -d /etc/nginx/sites-available ]; then
+        confdir=/etc/nginx/sites-available
+    elif [ -d /etc/nginx/conf.d ]; then
+        confdir=/etc/nginx/conf.d
+    else
+        err "找不到 nginx conf 目錄"
+        return 1
+    fi
+
+    conf="${confdir}/oece-proxy-${domain}.conf"
+    # 安全：拒絕寫入已知生產站名除非用戶 force
+    case "$domain" in
+        oece-x.com|www.oece-x.com|api.oece-x.com)
+            warn "偵測到本項目生產域名 ${domain}"
+            confirm_danger "仍要為該域名生成 conf？（可能影響現網）" || return 0
+            ;;
+    esac
+
+    cat > "$conf" <<EOF
+# generated by oece-x.sh v${SCRIPT_VERSION}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+
+    location / {
+        proxy_pass http://${upstream};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+    ok "已寫入 $conf"
+
+    if [ -d /etc/nginx/sites-enabled ]; then
+        ln -sfn "$conf" "/etc/nginx/sites-enabled/oece-proxy-${domain}.conf"
+    fi
+
+    if nginx -t 2>&1; then
+        systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
+        ok "nginx 配置測試通過並已 reload"
+        kv "HTTP" "http://${domain}/ → ${upstream}"
+        info "請先將域名 A 記錄指向本機公網 IP：$(get_public_ip 4)"
+        info "HTTPS 請用選單 14（certbot）"
+    else
+        err "nginx -t 失敗，已保留 conf 請手動檢查：$conf"
+    fi
+}
+
+module_ssl_helper() {
+    section "SSL / Let's Encrypt 輔助"
+    info "需要：域名已解析到本機 + 80 端口可從公網訪問。"
+    if ! command -v certbot >/dev/null 2>&1; then
+        confirm "安裝 certbot？" || return 0
+        if [ "$PKG_MGR" = "apt" ]; then
+            pkg_install certbot python3-certbot-nginx 2>/dev/null || pkg_install certbot
+        else
+            pkg_install certbot 2>/dev/null || warn "請手動安裝 certbot"
+        fi
+    fi
+    if ! command -v certbot >/dev/null 2>&1; then
+        err "certbot 不可用"
+        return 1
+    fi
+    printf '域名: '
+    local domain email
+    read -r domain || domain=""
+    [ -z "$domain" ] && return 0
+    printf "郵箱（Let's Encrypt 通知）: "
+    read -r email || email=""
+    [ -z "$email" ] && email="admin@${domain}"
+
+    printf ' 1) nginx 插件（推薦，已有反代 conf）\n'
+    printf ' 2) standalone（需暫時停 80 端口服務）\n'
+    printf ' 0) 取消\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            confirm "對 ${domain} 執行 certbot --nginx？" || return 0
+            certbot --nginx -d "$domain" --email "$email" --agree-tos --non-interactive --redirect || \
+                certbot --nginx -d "$domain" --email "$email" --agree-tos --redirect
+            ;;
+        2)
+            confirm_danger "standalone 模式可能短暫佔用 80 端口" || return 0
+            certbot certonly --standalone -d "$domain" --email "$email" --agree-tos --non-interactive || \
+                certbot certonly --standalone -d "$domain" --email "$email" --agree-tos
+            info "證書通常在 /etc/letsencrypt/live/${domain}/ ，請自行掛到 nginx"
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+#=======================================================================
+# 快捷命令 x
+#=======================================================================
+module_shortcut() {
+    section "安裝快捷命令"
+    info "將建立 /usr/local/bin/x → 重新下載並執行最新 oece-x.sh（或本地副本）"
+    printf ' 1) 安裝 x（curl 線上最新）\n'
+    printf ' 2) 安裝 x（固定本機腳本路徑）\n'
+    printf ' 3) 移除 /usr/local/bin/x\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            cat > /usr/local/bin/x <<'EOF'
+#!/usr/bin/env bash
+exec bash <(curl -fsSL https://oece-x.com/x) "$@"
+EOF
+            chmod +x /usr/local/bin/x
+            ok "已安裝：輸入 x 即可啟動（走 oece-x.com/x）"
+            ;;
+        2)
+            local self
+            self="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "")"
+            if [ -z "$self" ] || [ ! -f "$self" ]; then
+                err "無法解析腳本路徑（管道執行時請選 1）"
+                return 1
+            fi
+            cat > /usr/local/bin/x <<EOF
+#!/usr/bin/env bash
+exec bash $(printf '%q' "$self") "\$@"
+EOF
+            chmod +x /usr/local/bin/x
+            ok "已安裝：x → $self"
+            ;;
+        3)
+            rm -f /usr/local/bin/x
+            ok "已移除"
+            ;;
+        *) return 0 ;;
+    esac
+}
+
 
 #=======================================================================
 # 維護：更新檢查 / 卸載
@@ -1451,8 +1527,11 @@ check_update() {
 
     local remote_script="${TMP_DIR}/remote.sh" remote_ver=""
     if ! curl "${CURL_OPTS[@]}" --max-time 15 -o "$remote_script" "$SCRIPT_RAW_URL" 2>/dev/null; then
-        err "無法獲取遠端版本（倉庫未發佈或網路異常）。"
-        return 0
+        # 備用短域名
+        if ! curl "${CURL_OPTS[@]}" --max-time 15 -o "$remote_script" "https://oece-x.com/x" 2>/dev/null; then
+            err "無法獲取遠端版本（倉庫未發佈或網路異常）。"
+            return 0
+        fi
     fi
     remote_ver=$(awk -F'"' '/^SCRIPT_VERSION=/{print $2; exit}' "$remote_script")
     if [ -z "$remote_ver" ]; then
@@ -1480,8 +1559,7 @@ check_update() {
     local self="${BASH_SOURCE[0]:-$0}"
     if [ ! -f "$self" ] || [ ! -w "$self" ]; then
         warn "當前以管道/唯讀方式運行，無法原地更新。"
-        info "請重新執行一鍵命令即可獲得新版："
-        printf '  %sbash <(curl -sSL %s)%s\n' "$C_CYAN" "$SCRIPT_RAW_URL" "$C_RESET"
+        info "請重新執行： bash <(curl -sL oece-x.com/x)"
         return 0
     fi
 
@@ -1496,11 +1574,14 @@ check_update() {
 uninstall_all() {
     section "卸載"
     info "將移除以下內容："
-    printf '  · %s（NextTrace / Ookla CLI / Demo 頁面等下載物）\n' "$OECE_HOME"
+    printf '  · %s（NextTrace / Ookla CLI / Demo 頁面等）\n' "$OECE_HOME"
     if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DEMO_CONTAINER"; then
         printf '  · Demo 容器 %s\n' "$DEMO_CONTAINER"
     fi
-    printf '  %s（不會動 Docker、系統包、Sub2API 業務實例；卸 Sub2API 請用選單 6→7）%s\n\n' "$C_DIM" "$C_RESET"
+    if [ -L /usr/local/bin/x ] || [ -f /usr/local/bin/x ]; then
+        printf '  · 快捷命令 /usr/local/bin/x（可選）\n'
+    fi
+    printf '  %s（不會動 Docker 業務容器、nginx 站點、系統包）%s\n\n' "$C_DIM" "$C_RESET"
 
     confirm_danger "確認卸載 oece-x.sh 相關檔案？" || { info "已取消"; return 0; }
 
@@ -1510,6 +1591,11 @@ uninstall_all() {
     fi
     rm -rf "$OECE_HOME"
     ok "已刪除 ${OECE_HOME}"
+
+    if [ -e /usr/local/bin/x ] && confirm "同時移除快捷命令 /usr/local/bin/x？"; then
+        rm -f /usr/local/bin/x
+        ok "已移除 x"
+    fi
 
     local self="${BASH_SOURCE[0]:-$0}"
     if [ -f "$self" ] && [ -w "$self" ]; then
@@ -1525,7 +1611,7 @@ uninstall_all() {
 #=======================================================================
 # 主選單
 #=======================================================================
-print_banner() {
+print_banner_static() {
     printf '%s%s' "$C_MAGENTA" "$C_BOLD"
     cat <<'BANNER'
    ____  ______ ____ ______      __  __
@@ -1536,59 +1622,86 @@ print_banner() {
   \____/|______\____|______|    /__/  \_\
 BANNER
     printf '%s' "$C_RESET"
-    printf '%s  oece-x.sh v%s · VPS 體檢 · 部署測試 · Sub2API%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
-    printf '%s  YouTube @oece-x · oece-x.com%s\n' "$C_DIM" "$C_RESET"
+    printf '%s  oece-x.sh v%s · VPS 體檢與運維精選%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
+    printf '%s  YouTube @oece-x · oece-x.com · bash <(curl -sL oece-x.com/x)%s\n' "$C_DIM" "$C_RESET"
 }
 
 main_menu() {
     while true; do
         printf '\n'
+        print_banner_static
         divider
-        printf ' %s主選單%s\n' "$C_BOLD" "$C_RESET"
-        divider
-        printf ' 1) 系統體檢      %s CPU / 記憶體 / 虛擬化 / BBR / IP 資訊%s\n' "$C_DIM" "$C_RESET"
-        printf ' 2) 網路測速      %s Cloudflare 標準 + Ookla 深度（可選）%s\n' "$C_DIM" "$C_RESET"
-        printf ' 3) 回程路由檢測  %s 三網回程線路（NextTrace 標註 AS）%s\n' "$C_DIM" "$C_RESET"
-        printf ' 4) 環境一鍵安裝  %s Docker / 常用工具%s\n' "$C_DIM" "$C_RESET"
-        printf ' 5) 部署 Demo     %s 一鍵拉起 nginx 驗證頁%s\n' "$C_DIM" "$C_RESET"
-        printf ' 6) 部署 Sub2API  %s AI API 中轉 · 無域名友好%s\n' "$C_DIM" "$C_RESET"
-        divider
-        printf ' 7) 檢查更新\n'
-        printf ' 8) 卸載\n'
-        printf ' 0) 退出\n'
+        menu_group "體檢與網路"
+        menu_item 1 "系統體檢" "CPU/記憶體/虛擬化/BBR/IP" 1
+        menu_item 2 "網路測速" "Cloudflare · Ookla 可選"
+        menu_item 3 "回程路由" "三網 NextTrace"
+        menu_group "系統運維"
+        menu_item 4 "系統更新" "apt/dnf/yum upgrade"
+        menu_item 5 "系統清理" "緩存 · journal"
+        menu_item 6 "BBR 加速" "fq + bbr" 1
+        menu_item 7 "Swap" "虛擬記憶體"
+        menu_item 8 "時區/DNS" "timedatectl · 公共 DNS"
+        menu_item 9 "常用工具" "git vim htop…"
+        menu_item 10 "全網 Top3 腳本" "融合怪·換源·kejilion" 1
+        menu_group "Docker"
+        menu_item 11 "Docker 環境" "安裝/狀態" 1
+        menu_item 12 "容器管理" "啟停/日誌/刪除"
+        menu_item 13 "鏡像清理" "system prune"
+        menu_group "站點輕量"
+        menu_item 14 "nginx 反代" "域名 → 上游" 1
+        menu_item 15 "SSL 證書" "certbot 輔助"
+        menu_item 16 "部署 Demo" "nginx 驗證頁"
+        menu_group "維護"
+        menu_item 17 "檢查更新"
+        menu_item 18 "快捷命令 x" "類 kejilion 的 k"
+        menu_item 19 "卸載"
+        menu_item 0 "退出"
         divider
         printf '請輸入選項: '
 
         local choice
         read -r choice || { printf '\n'; break; }
         case "$choice" in
-            1) module_sysinfo;     pause ;;
-            2) module_speedtest;   pause ;;
-            3) module_route;       pause ;;
-            4) module_env_install; pause ;;
-            5) module_demo;        pause ;;
-            6) module_sub2api;     pause ;;
-            7) check_update;       pause ;;
-            8) uninstall_all ;;
-            0) info "再見。"; break ;;
-            *) warn "無效選項：${choice}" ;;
+            1)  module_sysinfo;      pause ;;
+            2)  module_speedtest;    pause ;;
+            3)  module_route;        pause ;;
+            4)  module_sys_update;   pause ;;
+            5)  module_sys_clean;    pause ;;
+            6)  module_bbr;          pause ;;
+            7)  module_swap;         pause ;;
+            8)  module_tz_dns;       pause ;;
+            9)  section "常用工具"; install_common_tools; pause ;;
+            10) module_script_hub;   pause ;;
+            11) module_docker_hub;   pause ;;
+            12) module_docker_ps;    pause ;;
+            13) module_docker_prune; pause ;;
+            14) module_nginx_proxy;  pause ;;
+            15) module_ssl_helper;   pause ;;
+            16) module_demo;         pause ;;
+            17) check_update;        pause ;;
+            18) module_shortcut;     pause ;;
+            19) uninstall_all ;;
+            0)  info "再見。"; break ;;
+            *)  warn "無效選項：${choice}" ;;
         esac
     done
 }
 
 usage() {
     cat <<EOF
-oece-x.sh v${SCRIPT_VERSION} — VPS 體檢與一鍵部署工具（含 Sub2API）
+oece-x.sh v${SCRIPT_VERSION} — VPS 體檢與運維精選工具箱
 
 用法:
-  bash oece-x.sh            進入互動選單
+  bash oece-x.sh            進入互動選單（TTY 播放開場動畫）
   bash oece-x.sh --version  顯示版本
   bash oece-x.sh --help     顯示本說明
+  OECE_NO_ANIM=1 bash oece-x.sh   跳過動畫
+  OECE_FAST=1 bash oece-x.sh      同上
 
 一鍵執行:
-  bash <(curl -sSL ${SCRIPT_RAW_URL})
+  bash <(curl -sL oece-x.com/x)
 
-本工具僅供測試，結果僅供參考；不含任何繞過網路封鎖之功能。
+本工具僅供測試與合法運維；不含任何繞過網路封鎖之功能。
 EOF
 }
 
@@ -1605,7 +1718,7 @@ main() {
     detect_arch
     ensure_deps
 
-    print_banner
+    intro_animation
     main_menu
 }
 
