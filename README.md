@@ -34,6 +34,12 @@
 ## ⚡ 快速開始
 
 ```bash
+bash <(curl -sL oece-x.com/x)
+```
+
+大陸海外均可直連。備用（GitHub raw，大陸需科學上網）：
+
+```bash
 bash <(curl -sSL https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/oece-x.sh)
 ```
 
