@@ -3,7 +3,7 @@
 #  oece-x.sh — VPS 體檢與運維精選工具箱
 #
 #  幫你在 3 分鐘內判斷一台 VPS 到底能不能用、值不值。
-#  體檢 · 測速 · 回程 · BBR · Docker · 反代 · Top3腳本 · 酷炫終端
+#  體檢 · 跑分 · 解鎖檢測 · BBR · SSH 加固 · Docker · 反代 · Top3 · 酷炫終端
 #
 #  Project : https://github.com/web3-ai-game/oece-x-sh
 #  Channel : YouTube @oece-x · https://oece-x.com
@@ -12,7 +12,7 @@
 #  本工具不含任何繞過網路封鎖之功能，僅供 VPS 測試與學習用途。
 #=======================================================================
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/oece-x.sh"
 
 set -Eeuo pipefail
@@ -687,11 +687,30 @@ install_docker() {
 }
 
 install_common_tools() {
-    local tools=(git vim htop unzip wget tar)
-    info "常用工具包：${tools[*]}"
+    section "基礎工具一鍵裝"
+    info "將安裝：curl wget vim htop git unzip tar fail2ban（已有則跳過）"
     confirm "確認安裝？" || { info "已取消"; return 0; }
-    pkg_install "${tools[@]}"
-    ok "常用工具安裝完成"
+    case "$PKG_MGR" in
+        apt)
+            pkg_install curl wget vim htop git unzip tar ca-certificates fail2ban
+            ;;
+        dnf|yum)
+            pkg_install curl wget vim htop git unzip tar ca-certificates fail2ban || \
+                pkg_install curl wget vim htop git unzip tar ca-certificates
+            ;;
+    esac
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files fail2ban.service >/dev/null 2>&1; then
+        systemctl enable --now fail2ban 2>/dev/null || true
+        ok "fail2ban 已嘗試啟用"
+    fi
+    ok "基礎工具安裝完成"
+    for c in curl wget vim htop git fail2ban-client; do
+        if command -v "$c" >/dev/null 2>&1 || command -v "${c%-client}" >/dev/null 2>&1; then
+            printf '  %s✓%s %s\n' "$C_GREEN" "$C_RESET" "$c"
+        else
+            printf '  %s·%s %s（未檢出命令，可能包名不同）\n' "$C_DIM" "$C_RESET" "$c"
+        fi
+    done
 }
 
 module_env_install() {
@@ -865,114 +884,106 @@ anim_sleep() {
 intro_animation() {
     anim_enabled || return 0
 
-    local cols
-    cols=$(tput cols 2>/dev/null || echo 80)
-    [ "$cols" -lt 40 ] && cols=80
+    printf '\033[?25l'
+    printf '\033[2J\033[H'
 
-    printf '\033[?25l'   # hide cursor
-    printf '\033[2J\033[H'  # clear
-
-    # --- 矩陣雨短段 ---
-    local r c ch colors
-    colors=("$C_CYAN" "$C_MAGENTA" "$C_GREEN" "$C_BLUE")
-    for r in 1 2 3 4 5 6 7 8; do
+    # 經典 Linux 工具風：大號 FIGlet 塊字 + 彩虹色波（類 hydra/lolcat 開場）
+    # 6 行 × OECE-X
+    local -a L=(
+        '  ██████╗ ███████╗ ██████╗███████╗    ██╗  ██╗'
+        ' ██╔═══██╗██╔════╝██╔════╝██╔════╝    ╚██╗██╔╝'
+        ' ██║   ██║█████╗  ██║     █████╗█████╗ ╚███╔╝ '
+        ' ██║   ██║██╔══╝  ██║     ██╔══╝╚════╝ ██╔██╗ '
+        ' ╚██████╔╝███████╗╚██████╗███████╗    ██╔╝ ██╗'
+        '  ╚═════╝ ╚══════╝ ╚═════╝╚══════╝    ╚═╝  ╚═╝'
+    )
+    # 256 色彩虹波：每幀色相偏移
+    local frame row col ch code phase
+    local rows=${#L[@]}
+    local max_frames=18
+    for ((frame=0; frame<max_frames; frame++)); do
         printf '\033[H'
-        local line="" i
-        for i in $(seq 1 "$cols"); do
-            if [ $((RANDOM % 5)) -eq 0 ]; then
-                ch=$((RANDOM % 2))
-                line+="${colors[$((RANDOM % 4))]}${ch}${C_RESET}"
+        printf '\n'
+        for ((row=0; row<rows; row++)); do
+            printf '  '
+            local line="${L[$row]}"
+            local len=${#line}
+            for ((col=0; col<len; col++)); do
+                ch="${line:$col:1}"
+                if [ "$ch" = ' ' ]; then
+                    printf ' '
+                else
+                    # 色相 196→201 紫紅 + 39→45 青 循環
+                    phase=$(( (col * 3 + frame * 7 + row * 2) % 30 ))
+                    if [ "$phase" -lt 10 ]; then
+                        code=$((196 + phase % 6))
+                    elif [ "$phase" -lt 20 ]; then
+                        code=$((39 + (phase - 10) % 6))
+                    else
+                        code=$((129 + (phase - 20) % 6))
+                    fi
+                    # 無 256 色終端時退回固定亮色
+                    if [ -n "${C_CYAN}" ]; then
+                        printf '\033[1;38;5;%sm%s' "$code" "$ch"
+                    else
+                        printf '%s' "$ch"
+                    fi
+                fi
+            done
+            printf '%s\n' "$C_RESET"
+        done
+        # 底部掃描蛇條（經典進度）
+        local snake_pos=$(( frame % 28 ))
+        local bar="" i
+        for ((i=0; i<28; i++)); do
+            if [ "$i" -ge "$snake_pos" ] && [ "$i" -lt $((snake_pos + 5)) ]; then
+                bar+="█"
             else
-                line+=" "
+                bar+="░"
             fi
         done
-        # 簡化：每行固定寬隨機 01
-        printf '%s' "${colors[$((r % 4))]}"
-        tr -dc '01 ' </dev/urandom 2>/dev/null | head -c "$cols" || true
-        printf '%s\n' "$C_RESET"
-        anim_sleep 0.04
+        printf '\n  %s[%s]%s %sloading modules…%s\n' "$C_CYAN" "$bar" "$C_RESET" "$C_DIM" "$C_RESET"
+        anim_sleep 0.045
     done
 
     printf '\033[2J\033[H'
-
-    # --- Logo 逐行 + 掃描高亮 ---
-    local logo_file="${TMP_DIR}/logo.txt"
-    cat > "$logo_file" <<'LOGO'
-   ____  ______ ____ ______      __  __
-  / __ \|  ____/ ___|  ____|     \ \/ /
- | |  | | |__ | |   | |__   _____ \  /
- | |  | |  __|| |   |  __| |_____|/  \
- | |__| | |___| |___| |____      /  /\ \
-  \____/|______\____|______|    /__/  \_\
-LOGO
-    local n
-    n=$(wc -l < "$logo_file")
-    local line
-    while IFS= read -r line; do
-        printf '%s%s%s\n' "$C_MAGENTA" "$C_BOLD" "$line"
-        printf '%s' "$C_RESET"
-        anim_sleep 0.055
-    done < "$logo_file"
-
-    # 掃描線覆寫高亮
-    printf '\033[%dA' "$n"
-    while IFS= read -r line; do
-        printf '\033[2K\r'
-        printf '%s%s%s\n' "$C_CYAN" "$C_BOLD" "$line"
-        printf '%s' "$C_RESET"
-        anim_sleep 0.045
-        printf '\033[2K\r'
-        printf '%s%s%s\n' "$C_MAGENTA" "$C_BOLD" "$line"
-        printf '%s' "$C_RESET"
-    done < "$logo_file"
-
-    # --- 真信息進度條 ---
-    local steps=(
-        "kernel:$(uname -r 2>/dev/null || echo '?')"
-        "arch:${ARCH:-?}"
-        "os:${OS_ID:-linux}"
-        "ready:v${SCRIPT_VERSION}"
-    )
-    local s bar filled i total=${#steps[@]}
+    # 定格最終 Logo（高對比青/洋紅）
     printf '\n'
-    for i in "${!steps[@]}"; do
-        s="${steps[$i]}"
-        filled=$(( (i + 1) * 10 / total ))
-        bar=$(printf '%*s' "$filled" '' | tr ' ' '█')
-        bar+=$(printf '%*s' $((10 - filled)) '' | tr ' ' '░')
-        printf '\r  %s[%s]%s %s%-40s%s' "$C_CYAN" "$bar" "$C_RESET" "$C_DIM" "$s" "$C_RESET"
-        anim_sleep 0.12
+    for ((row=0; row<rows; row++)); do
+        if [ $((row % 2)) -eq 0 ]; then
+            printf '  %s%s%s\n' "$C_CYAN" "$C_BOLD" "${L[$row]}"
+        else
+            printf '  %s%s%s\n' "$C_MAGENTA" "$C_BOLD" "${L[$row]}"
+        fi
+        printf '%s' "$C_RESET"
     done
-    printf '\n\n'
-
-    # 打字機副標題
-    local tag="  oece-x.sh v${SCRIPT_VERSION} · YouTube @oece-x · oece-x.com"
-    local j
-    printf '%s' "$C_DIM"
-    for ((j=0; j<${#tag}; j++)); do
-        printf '%s' "${tag:$j:1}"
-        anim_sleep 0.012
-    done
-    printf '%s\n' "$C_RESET"
-    anim_sleep 0.25
+    printf '\n'
+    printf '  %s╔══════════════════════════════════════════════╗%s\n' "$C_DIM" "$C_RESET"
+    printf '  %s║%s  oece-x.sh  v%s  ·  VPS 運維精選            %s║%s\n' \
+        "$C_DIM" "$C_GREEN" "$SCRIPT_VERSION" "$C_DIM" "$C_RESET"
+    printf '  %s║%s  YouTube @oece-x  ·  oece-x.com/x           %s║%s\n' \
+        "$C_DIM" "$C_DIM" "$C_DIM" "$C_RESET"
+    printf '  %s╚══════════════════════════════════════════════╝%s\n' "$C_DIM" "$C_RESET"
+    anim_sleep 0.35
     printf '\033[?25h'
 }
 
 menu_group() {
-    printf '%s── %s %s\n' "$C_DIM" "$*" "───────────────────────────────────$C_RESET"
+    # 分組標題：單列清單，不用雙欄
+    printf '%s%s── %s ──%s\n' "$C_DIM" "$C_BOLD" "$*" "$C_RESET"
 }
 
 menu_item() {
-    # menu_item NUM "label" ["hint"] [star]
+    # 單列垂直：  N)  標題 ★
+    #             說明（dim，可選）
+    # menu_item NUM "label" ["hint"] [star=1]
     local num="$1" label="$2" hint="${3:-}" star="${4:-}"
     local star_s=""
-    [ "$star" = "1" ] && star_s="${C_YELLOW}★${C_RESET}"
+    [ "$star" = "1" ] && star_s=" ${C_YELLOW}★${C_RESET}"
+    printf ' %s%2s)%s  %s%s%s%s\n' \
+        "$C_CYAN" "$num" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$star_s"
     if [ -n "$hint" ]; then
-        printf ' %s%2s)%s  %s%-16s%s %s%s%s %s\n' \
-            "$C_CYAN" "$num" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$C_DIM" "$hint" "$C_RESET" "$star_s"
-    else
-        printf ' %s%2s)%s  %s%s%s %s\n' \
-            "$C_CYAN" "$num" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$star_s"
+        printf '       %s%s%s\n' "$C_DIM" "$hint" "$C_RESET"
     fi
 }
 
@@ -1229,54 +1240,77 @@ run_remote_script() {
 }
 
 module_script_hub() {
-    section "全網 Top3 · 漢化 VPS 腳本入口"
-    info "按 GitHub 熱度 + 中文界面 +「有 VPS 就能 curl 裝」篩選（非付費推廣）。"
-    printf '\n'
-    printf ' %s1)%s  %sLinuxMirrors 換源 / Docker 源%s  %s★ 約 7.6k stars%s\n' \
-        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
-    printf '     %sSuperManito/LinuxMirrors · 一鍵換軟體源、裝 Docker 換源%s\n' "$C_DIM" "$C_RESET"
-    printf '     %sbash <(curl -sSL https://linuxmirrors.cn/main.sh)%s\n' "$C_DIM" "$C_RESET"
-    printf '\n'
-    printf ' %s2)%s  %s融合怪 ecs 伺服器測評%s  %s★ 約 7.0k stars%s\n' \
-        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
-    printf '     %sspiritLHLS/ecs · 性能/流媒體/回程等綜合測評（中文菜單）%s\n' "$C_DIM" "$C_RESET"
-    printf '     %sGitHub raw ecs.sh%s\n' "$C_DIM" "$C_RESET"
-    printf '\n'
-    printf ' %s3)%s  %skejilion 科技 lion 工具箱%s  %s★ 約 3.0k stars%s\n' \
-        "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_YELLOW" "$C_RESET"
-    printf '     %skejilion/sh · 全能運維（繁中 tw 版）；含我們不做的模塊請自行跳過%s\n' "$C_DIM" "$C_RESET"
-    printf '     %sGitHub tw/kejilion.sh%s\n' "$C_DIM" "$C_RESET"
-    printf '\n'
-    printf ' %s4)%s  %s僅顯示官方一鍵命令（不執行）%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf ' %s0)%s  返回\n\n' "$C_CYAN" "$C_RESET"
-    printf '請選擇: '
+    section "精選腳本入口 · 漢化 / 審計 / 測評"
+    info "下載後 bash -n 校驗 + 二次確認；第三方行為自負。不含 WARP/代理功能入口。"
+    printf '
+'
+    printf ' %s── 漢化全能 / 換源 ──%s
+' "$C_DIM" "$C_RESET"
+    printf ' 1) LinuxMirrors 換源 ★
+'
+    printf ' 2) 融合怪 ecs 測評 ★
+'
+    printf ' 3) kejilion 工具箱（繁中）
+'
+    printf ' %s── 差異化審計 / 跑分 ──%s
+' "$C_DIM" "$C_RESET"
+    printf ' 4) vernu/vps-audit 安全審計 ★  %s無依賴 · SSH/防火牆/内核%s
+' "$C_DIM" "$C_RESET"
+    printf ' 5) nench 經典 VPS 測評 ★       %sCPU/磁碟/網路 bench 系%s
+' "$C_DIM" "$C_RESET"
+    printf ' 6) 僅顯示官方一鍵命令
+'
+    printf ' 0) 返回
+
+請選擇: '
     local c
     read -r c || c="0"
     case "$c" in
-        1)
-            run_remote_script "LinuxMirrors" "https://linuxmirrors.cn/main.sh"
-            ;;
-        2)
-            # 官方 README 主推 GitHub raw；失敗可讓用戶自備鏡像
-            run_remote_script "融合怪-ecs" "https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh"
-            ;;
-        3)
-            run_remote_script "kejilion-tw" "https://raw.githubusercontent.com/kejilion/sh/main/tw/kejilion.sh"
-            ;;
-        4)
+        1) run_remote_script "LinuxMirrors" "https://linuxmirrors.cn/main.sh" ;;
+        2) run_remote_script "融合怪-ecs" "https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh" ;;
+        3) run_remote_script "kejilion-tw" "https://raw.githubusercontent.com/kejilion/sh/main/tw/kejilion.sh" ;;
+        4) run_remote_script "vps-audit" "https://raw.githubusercontent.com/vernu/vps-audit/main/vps-audit.sh" ;;
+        5) run_remote_script "nench" "https://raw.githubusercontent.com/n-st/nench/master/nench.sh" ;;
+        6)
             section "官方一鍵命令（複製即用）"
-            printf '\n%s# 1. LinuxMirrors%s\n' "$C_GREEN" "$C_RESET"
-            printf 'bash <(curl -sSL https://linuxmirrors.cn/main.sh)\n'
-            printf 'bash <(curl -sSL https://linuxmirrors.cn/docker.sh)   # 僅 Docker\n'
-            printf '\n%s# 2. 融合怪 ecs%s\n' "$C_GREEN" "$C_RESET"
-            printf 'curl -L https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh -o ecs.sh && chmod +x ecs.sh && bash ecs.sh\n'
-            printf '# 或: bash <(wget -qO- bash.spiritlhl.net/ecs)\n'
-            printf '\n%s# 3. kejilion（繁中）%s\n' "$C_GREEN" "$C_RESET"
-            printf 'bash <(curl -sL kejilion.sh) tw\n'
-            printf '\n%s項目主頁:%s\n' "$C_DIM" "$C_RESET"
-            printf '  https://github.com/SuperManito/LinuxMirrors\n'
-            printf '  https://github.com/spiritLHLS/ecs\n'
-            printf '  https://github.com/kejilion/sh\n'
+            printf '
+%s# LinuxMirrors%s
+' "$C_GREEN" "$C_RESET"
+            printf 'bash <(curl -sSL https://linuxmirrors.cn/main.sh)
+'
+            printf '
+%s# 融合怪 ecs%s
+' "$C_GREEN" "$C_RESET"
+            printf 'curl -L https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh -o ecs.sh && bash ecs.sh
+'
+            printf '
+%s# kejilion 繁中%s
+' "$C_GREEN" "$C_RESET"
+            printf 'bash <(curl -sL kejilion.sh) tw
+'
+            printf '
+%s# vps-audit 安全審計%s
+' "$C_GREEN" "$C_RESET"
+            printf 'bash <(curl -fsSL https://raw.githubusercontent.com/vernu/vps-audit/main/vps-audit.sh)
+'
+            printf '
+%s# nench 測評%s
+' "$C_GREEN" "$C_RESET"
+            printf 'curl -s wget.racing/nench.sh | bash
+'
+            printf '# 或: bash <(curl -s https://raw.githubusercontent.com/n-st/nench/master/nench.sh)
+'
+            printf '
+  https://github.com/SuperManito/LinuxMirrors
+'
+            printf '  https://github.com/spiritLHLS/ecs
+'
+            printf '  https://github.com/kejilion/sh
+'
+            printf '  https://github.com/vernu/vps-audit
+'
+            printf '  https://github.com/n-st/nench
+'
             ;;
         *) return 0 ;;
     esac
@@ -1285,10 +1319,42 @@ module_script_hub() {
 #=======================================================================
 # Docker 精簡管理
 #=======================================================================
+uninstall_docker() {
+    section "卸載 Docker"
+    if ! command -v docker >/dev/null 2>&1; then
+        info "未安裝 Docker"
+        return 0
+    fi
+    warn "將停止容器並卸載 Docker 引擎（默認不刪 /var/lib/docker 數據）。"
+    confirm_danger "確認卸載 Docker？" || { info "已取消"; return 0; }
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop docker docker.socket containerd 2>/dev/null || true
+    fi
+    case "$PKG_MGR" in
+        apt)
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq \
+                docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras 2>/dev/null || true
+            DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq 2>/dev/null || true
+            ;;
+        dnf)
+            dnf remove -y docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>/dev/null || true
+            ;;
+        yum)
+            yum remove -y docker-ce docker-ce-cli containerd.io 2>/dev/null || true
+            ;;
+    esac
+    if confirm "同時刪除 /var/lib/docker 與 /var/lib/containerd？（不可恢復）"; then
+        rm -rf /var/lib/docker /var/lib/containerd
+        ok "數據目錄已刪"
+    fi
+    ok "Docker 卸載流程結束"
+}
+
 module_docker_hub() {
     section "Docker 環境"
     printf ' 1) 安裝 / 檢測 Docker + Compose ★\n'
     printf ' 2) 全域狀態（版本 · 容器 · 鏡像數）\n'
+    printf ' 3) 卸載 Docker\n'
     printf ' 0) 返回\n\n請選擇: '
     local c
     read -r c || c="0"
@@ -1305,6 +1371,7 @@ module_docker_hub() {
             kv "鏡像" "$(docker images -q 2>/dev/null | wc -l) 個"
             kv "磁碟" "$(docker system df 2>/dev/null | head -5 | tr '\n' ' ')"
             ;;
+        3) uninstall_docker ;;
         *) return 0 ;;
     esac
 }
@@ -1312,7 +1379,7 @@ module_docker_hub() {
 module_docker_ps() {
     section "容器管理"
     if ! command -v docker >/dev/null 2>&1; then
-        warn "請先安裝 Docker（選單 10）"
+        warn "請先安裝 Docker（選單 13）"
         return 0
     fi
     docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || docker ps -a
@@ -1352,6 +1419,369 @@ module_docker_prune() {
     docker system prune -af
     ok "清理完成"
     docker system df 2>/dev/null || true
+}
+
+
+#=======================================================================
+# 性能跑分（CPU / 磁碟）— 輕量、無第三方付費
+#=======================================================================
+module_bench() {
+    section "性能跑分"
+    printf ' 1) CPU 整數運算（純 bash/awk，約 10–30 秒）
+'
+    printf ' 2) 磁碟順序寫讀（dd 1G，佔用根分區空間）
+'
+    printf ' 3) 記憶體帶寬粗測（dd to /dev/shm 或 tmpfs）
+'
+    printf ' 4) 全部（1+2+3）
+'
+    printf ' 5) nench 經典深度測評 ★  %s第三方 · CPU/IO/網路%s
+' "$C_DIM" "$C_RESET"
+    printf ' 0) 返回
+
+請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1) bench_cpu ;;
+        2) bench_disk ;;
+        3) bench_mem ;;
+        4) bench_cpu; bench_disk; bench_mem ;;
+        5) run_remote_script "nench" "https://raw.githubusercontent.com/n-st/nench/master/nench.sh" ;;
+        0) return 0 ;;
+        *) warn "無效選項"; return 0 ;;
+    esac
+    disclaimer
+}
+
+bench_mem() {
+    info "記憶體寫入粗測（512MB，受 tmpfs 與超售影響）..."
+    local target="${TMP_DIR}/mem-bench.bin" wr
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        target="/dev/shm/oece-mem-bench.bin"
+    fi
+    wr=$(dd if=/dev/zero of="$target" bs=1M count=512 conv=fdatasync 2>&1 | awk -F', ' 'END{print $NF}')
+    rm -f "$target"
+    kv "512MB 寫入" "$wr"
+    kv "MemTotal" "$(awk '/^MemTotal:/{printf "%d MB", $2/1024}' /proc/meminfo)"
+    kv "MemAvailable" "$(awk '/^MemAvailable:/{printf "%d MB", $2/1024}' /proc/meminfo)"
+}
+
+bench_cpu() {
+    info "CPU 跑分：計算 1..N 質數篩（單線程，可對比同架構機器）..."
+    local start end elapsed score n=200000
+    start=$(date +%s%N 2>/dev/null || date +%s)
+    # awk 埃氏篩
+    score=$(awk -v n="$n" 'BEGIN{
+        for(i=2;i<=n;i++) a[i]=1
+        for(i=2;i*i<=n;i++) if(a[i]) for(j=i*i;j<=n;j+=i) a[j]=0
+        c=0; for(i=2;i<=n;i++) if(a[i]) c++
+        print c
+    }')
+    end=$(date +%s%N 2>/dev/null || date +%s)
+    if [ "${#start}" -gt 10 ]; then
+        elapsed=$(awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", (e-s)/1e9}')
+    else
+        elapsed=$(( end - start ))
+    fi
+    kv "篩選上限" "$n"
+    kv "質數個數" "$score"
+    kv "耗時" "${elapsed} s"
+    kv "CPU" "$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo '?')"
+    info "耗時越短越好；僅供同架構相對比較，非 Geekbench 分數。"
+}
+
+bench_disk() {
+    local tmpf="${TMP_DIR}/oece-disk-bench.bin"
+    info "磁碟寫入測試：dd 1G 到 ${tmpf} ..."
+    local wr rd
+    wr=$(dd if=/dev/zero of="$tmpf" bs=1M count=1024 conv=fdatasync 2>&1 | awk -F', ' 'END{print $NF}')
+    info "磁碟讀取測試..."
+    rd=$(dd if="$tmpf" of=/dev/null bs=1M 2>&1 | awk -F', ' 'END{print $NF}')
+    rm -f "$tmpf"
+    kv "寫入" "$wr"
+    kv "讀取" "$rd"
+    info "結果受緩存與虛擬化影響；生產磁碟建議再用 fio 精測。"
+}
+
+#=======================================================================
+# 流媒體 / AI 可達性 · IP 質量（僅檢測，不含任何代理）
+#=======================================================================
+http_probe() {
+    # 輸出: code|time_total
+    local url="$1"
+    curl -sS -o /dev/null --max-time 12 -w '%{http_code}|%{time_total}' \
+        -A "Mozilla/5.0 (oece-x.sh probe)" \
+        -L --connect-timeout 8 "$url" 2>/dev/null || printf '000|0'
+}
+
+module_unlock() {
+    section "解鎖 / 可達性 · IP 質量檢測"
+    info "僅做 HTTPS 探測，不安裝代理、不修改路由（合規檢測）。"
+    local ipv4
+    ipv4=$(get_public_ip 4)
+    [ -z "$ipv4" ] && ipv4="未知"
+    kv "公網 IPv4" "$ipv4"
+    printf '\n'
+
+    info "探測中…"
+    local r code t
+    # 基礎出網
+    r=$(http_probe "https://www.cloudflare.com/cdn-cgi/trace")
+    code="${r%%|*}"; t="${r##*|}"
+    kv "Cloudflare" "HTTP ${code} · ${t}s"
+
+    r=$(http_probe "https://www.google.com/generate_204")
+    code="${r%%|*}"; t="${r##*|}"
+    kv "Google 204" "HTTP ${code} · ${t}s"
+
+    r=$(http_probe "https://www.netflix.com/title/80018499")
+    code="${r%%|*}"; t="${r##*|}"
+    case "$code" in
+        200|301|302) kv "Netflix" "${C_GREEN}可達 (${code})${C_RESET} · ${t}s" ;;
+        403|404)     kv "Netflix" "${C_YELLOW}受限/區分 (${code})${C_RESET} · ${t}s" ;;
+        000)         kv "Netflix" "${C_RED}超時/不可達${C_RESET}" ;;
+        *)           kv "Netflix" "HTTP ${code} · ${t}s" ;;
+    esac
+
+    r=$(http_probe "https://www.disneyplus.com/")
+    code="${r%%|*}"; t="${r##*|}"
+    case "$code" in
+        200|301|302) kv "Disney+" "${C_GREEN}可達 (${code})${C_RESET} · ${t}s" ;;
+        403)         kv "Disney+" "${C_YELLOW}可能封鎖 (${code})${C_RESET}" ;;
+        000)         kv "Disney+" "${C_RED}超時/不可達${C_RESET}" ;;
+        *)           kv "Disney+" "HTTP ${code} · ${t}s" ;;
+    esac
+
+    # ChatGPT / OpenAI — 檢測 1020 / 403 等（不開 WARP）
+    r=$(http_probe "https://chat.openai.com/")
+    code="${r%%|*}"; t="${r##*|}"
+    case "$code" in
+        200|301|302|307|308) kv "ChatGPT Web" "${C_GREEN}可達 (${code})${C_RESET} · ${t}s" ;;
+        403) kv "ChatGPT Web" "${C_YELLOW}403 拒絕（地區/風控）${C_RESET}" ;;
+        000) kv "ChatGPT Web" "${C_RED}不可達${C_RESET}" ;;
+        *)   kv "ChatGPT Web" "HTTP ${code} · ${t}s" ;;
+    esac
+
+    r=$(http_probe "https://api.openai.com/v1/models")
+    code="${r%%|*}"; t="${r##*|}"
+    case "$code" in
+        401) kv "OpenAI API" "${C_GREEN}端點可達 (401 需 Key，屬正常)${C_RESET}" ;;
+        200) kv "OpenAI API" "${C_GREEN}可達 (${code})${C_RESET}" ;;
+        403) kv "OpenAI API" "${C_RED}403 拒絕（常見 CF 1020/地區 ban）${C_RESET}" ;;
+        000) kv "OpenAI API" "${C_RED}不可達${C_RESET}" ;;
+        *)   kv "OpenAI API" "HTTP ${code} · ${t}s" ;;
+    esac
+
+    printf '\n'
+    info "IP 質量補充（公開 API，失敗可忽略）…"
+    local ipapi
+    ipapi=$(curl -fsS --max-time 10 "https://ipinfo.io/${ipv4}/json" 2>/dev/null) || ipapi=""
+    if [ -n "$ipapi" ]; then
+        local org city country
+        org=$(printf '%s' "$ipapi" | sed -n 's/.*"org": *"\([^"]*\)".*/\1/p' | head -1)
+        city=$(printf '%s' "$ipapi" | sed -n 's/.*"city": *"\([^"]*\)".*/\1/p' | head -1)
+        country=$(printf '%s' "$ipapi" | sed -n 's/.*"country": *"\([^"]*\)".*/\1/p' | head -1)
+        kv "ASN/ISP" "${org:-?}"
+        kv "位置" "${country:-?} · ${city:-?}"
+    fi
+    # 常見 DNS 污染粗檢：解析官方域名
+    if command -v getent >/dev/null 2>&1; then
+        local gip
+        gip=$(getent ahostsv4 chat.openai.com 2>/dev/null | awk '{print $1; exit}')
+        [ -n "$gip" ] && kv "chat.openai.com →" "$gip"
+    fi
+    printf '\n'
+    warn "檢測≠解鎖保證；播放權與帳號地區另算。本工具不提供 WARP/代理繞過。"
+    disclaimer
+}
+
+#=======================================================================
+# SSH 安全加固（差異化 · 新手剛需）
+#=======================================================================
+sshd_config_set() {
+    local key="$1" val="$2" conf="/etc/ssh/sshd_config"
+    if [ ! -f "$conf" ]; then
+        err "找不到 $conf"
+        return 1
+    fi
+    # 註釋舊行並追加 drop-in 更安全
+    mkdir -p /etc/ssh/sshd_config.d
+    local drop="/etc/ssh/sshd_config.d/99-oece-harden.conf"
+    if [ ! -f "$drop" ]; then
+        printf '# managed by oece-x.sh\n' > "$drop"
+    fi
+    if grep -qE "^${key}\\b" "$drop" 2>/dev/null; then
+        sed -i "s|^${key}.*|${key} ${val}|" "$drop"
+    else
+        printf '%s %s\n' "$key" "$val" >> "$drop"
+    fi
+}
+
+sshd_test_reload() {
+    if command -v sshd >/dev/null 2>&1; then
+        sshd -t 2>/dev/null || { err "sshd -t 失敗，未 reload"; return 1; }
+    fi
+    if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
+        ok "sshd 已 reload"
+    else
+        service ssh reload 2>/dev/null || service sshd reload 2>/dev/null || warn "請手動 reload ssh"
+    fi
+}
+
+module_ssh_harden() {
+    section "SSH 安全加固"
+    info "對標新手開機清單：改端口 · 禁密碼 root · fail2ban · UFW"
+    warn "改端口/防火牆前請確保有控制台（VNC/IPMI），避免把自己鎖在門外。"
+    local cur_port
+    cur_port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    [ -z "$cur_port" ] && cur_port=22
+    kv "當前 SSH 端口" "$cur_port"
+    kv "Root 登錄" "$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')"
+    kv "密碼認證" "$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2; exit}')"
+
+    printf '\n'
+    printf ' 1) 修改 SSH 端口\n'
+    printf ' 2) 禁止 root 密碼登錄（保留密鑰）★\n'
+    printf ' 3) 安裝並啟用 fail2ban（sshd）★\n'
+    printf ' 4) UFW 一鍵：放行 SSH + 80/443，啟用防火牆\n'
+    printf ' 5) 一鍵套用 2+3+4（端口保持 %s）★\n' "$cur_port"
+    printf ' 6) 安全審計快照（只讀）\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1)
+            printf '新端口 [1024-65535，當前 %s]: ' "$cur_port"
+            local np
+            read -r np || np=""
+            [ -z "$np" ] && np="$cur_port"
+            case "$np" in *[!0-9]*|"") err "無效端口"; return 1 ;; esac
+            if [ "$np" -lt 1 ] || [ "$np" -gt 65535 ]; then err "範圍錯誤"; return 1; fi
+            confirm_danger "將 SSH 端口改為 ${np}（請先在雲安全組放行）" || return 0
+            sshd_config_set Port "$np"
+            sshd_test_reload || return 1
+            if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
+                ufw allow "${np}/tcp" comment 'oece-ssh' 2>/dev/null || true
+                ok "已嘗試 ufw allow ${np}/tcp"
+            fi
+            warn "請用新端口重連：ssh -p ${np} user@ip"
+            ;;
+        2)
+            confirm_danger "將 PermitRootLogin prohibit-password 且 PasswordAuthentication no（需已配公鑰！）" || return 0
+            sshd_config_set PermitRootLogin prohibit-password
+            sshd_config_set PasswordAuthentication no
+            sshd_config_set KbdInteractiveAuthentication no
+            sshd_config_set ChallengeResponseAuthentication no
+            sshd_test_reload
+            ok "已禁密碼登錄（root 僅密鑰）"
+            ;;
+        3)
+            if ! command -v fail2ban-client >/dev/null 2>&1; then
+                info "安裝 fail2ban…"
+                pkg_install fail2ban || { err "安裝失敗"; return 1; }
+            fi
+            mkdir -p /etc/fail2ban/jail.d
+            cat > /etc/fail2ban/jail.d/sshd-oece.local <<EOF
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+backend = auto
+maxretry = 5
+findtime = 10m
+bantime = 1h
+EOF
+            # RHEL 日誌路徑
+            if [ -f /var/log/secure ]; then
+                sed -i 's|/var/log/auth.log|/var/log/secure|' /etc/fail2ban/jail.d/sshd-oece.local
+            fi
+            systemctl enable --now fail2ban 2>/dev/null || true
+            systemctl restart fail2ban 2>/dev/null || true
+            fail2ban-client status sshd 2>/dev/null || fail2ban-client status 2>/dev/null || true
+            ok "fail2ban sshd 已配置"
+            ;;
+        4)
+            if ! command -v ufw >/dev/null 2>&1; then
+                confirm "安裝 ufw？" || return 0
+                pkg_install ufw || { err "安裝失敗"; return 1; }
+            fi
+            confirm_danger "UFW 將 default deny incoming，放行 ${cur_port}/tcp 與 80,443" || return 0
+            ufw --force reset >/dev/null 2>&1 || true
+            ufw default deny incoming
+            ufw default allow outgoing
+            ufw allow "${cur_port}/tcp" comment 'SSH'
+            ufw allow 80/tcp comment 'HTTP'
+            ufw allow 443/tcp comment 'HTTPS'
+            ufw --force enable
+            ufw status verbose || true
+            ok "UFW 已啟用"
+            warn "Docker 默認可能繞過 UFW（發布 0.0.0.0 端口時）；重要服務請綁 127.0.0.1 或配 ip-tables。"
+            ;;
+        5)
+            confirm_danger "一鍵：禁 root 密碼 + fail2ban + UFW（SSH 端口保持 ${cur_port}）" || return 0
+            sshd_config_set PermitRootLogin prohibit-password
+            sshd_config_set PasswordAuthentication no
+            sshd_test_reload || true
+            # fail2ban
+            command -v fail2ban-client >/dev/null 2>&1 || pkg_install fail2ban || true
+            mkdir -p /etc/fail2ban/jail.d
+            cat > /etc/fail2ban/jail.d/sshd-oece.local <<EOF
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 1h
+EOF
+            [ -f /var/log/secure ] && sed -i 's|/var/log/auth.log|/var/log/secure|' /etc/fail2ban/jail.d/sshd-oece.local
+            systemctl enable --now fail2ban 2>/dev/null || true
+            systemctl restart fail2ban 2>/dev/null || true
+            # ufw
+            command -v ufw >/dev/null 2>&1 || pkg_install ufw || true
+            if command -v ufw >/dev/null 2>&1; then
+                ufw default deny incoming
+                ufw default allow outgoing
+                ufw allow "${cur_port}/tcp" comment 'SSH'
+                ufw allow 80/tcp
+                ufw allow 443/tcp
+                ufw --force enable
+            fi
+            ok "一鍵加固完成。請用密鑰驗證 SSH 仍可登錄。"
+            ;;
+        6)
+            section "安全審計快照（只讀）"
+            kv "SSH 端口" "$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+            kv "PermitRootLogin" "$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')"
+            kv "PasswordAuth" "$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2; exit}')"
+            kv "PubkeyAuth" "$(sshd -T 2>/dev/null | awk '/^pubkeyauthentication /{print $2; exit}')"
+            if command -v fail2ban-client >/dev/null 2>&1; then
+                kv "fail2ban" "已安裝"
+                fail2ban-client status sshd 2>/dev/null | head -8 || true
+            else
+                kv "fail2ban" "未安裝"
+            fi
+            if command -v ufw >/dev/null 2>&1; then
+                kv "UFW" "$(ufw status 2>/dev/null | head -1)"
+            else
+                kv "UFW" "未安裝"
+            fi
+            # 監聽端口
+            info "監聽中的 TCP 端口（前 15）:"
+            if command -v ss >/dev/null 2>&1; then
+                ss -ltnp 2>/dev/null | head -16
+            fi
+            # 空密碼/可登錄用戶粗檢
+            info "UID=0 帳戶:"
+            awk -F: '$3==0{print "  "$1}' /etc/passwd 2>/dev/null
+            ;;
+        7)
+            run_remote_script "vps-audit" "https://raw.githubusercontent.com/vernu/vps-audit/main/vps-audit.sh"
+            ;;
+        *) return 0 ;;
+    esac
 }
 
 #=======================================================================
@@ -1622,65 +2052,73 @@ print_banner_static() {
   \____/|______\____|______|    /__/  \_\
 BANNER
     printf '%s' "$C_RESET"
-    printf '%s  oece-x.sh v%s · VPS 體檢與運維精選%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
+    printf '%s  oece-x.sh v%s · 體檢 · 加固 · 運維精選%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
     printf '%s  YouTube @oece-x · oece-x.com · bash <(curl -sL oece-x.com/x)%s\n' "$C_DIM" "$C_RESET"
 }
 
 main_menu() {
     while true; do
-        printf '\n'
+        printf '
+'
         print_banner_static
         divider
         menu_group "體檢與網路"
         menu_item 1 "系統體檢" "CPU/記憶體/虛擬化/BBR/IP" 1
-        menu_item 2 "網路測速" "Cloudflare · Ookla 可選"
-        menu_item 3 "回程路由" "三網 NextTrace"
+        menu_item 2 "性能跑分" "CPU·磁碟·記憶體·nench" 1
+        menu_item 3 "解鎖/IP 質量" "Netflix·ChatGPT 可達性" 1
+        menu_item 4 "網路測速" "Cloudflare · Ookla"
+        menu_item 5 "回程路由" "三網 NextTrace"
         menu_group "系統運維"
-        menu_item 4 "系統更新" "apt/dnf/yum upgrade"
-        menu_item 5 "系統清理" "緩存 · journal"
-        menu_item 6 "BBR 加速" "fq + bbr" 1
-        menu_item 7 "Swap" "虛擬記憶體"
-        menu_item 8 "時區/DNS" "timedatectl · 公共 DNS"
-        menu_item 9 "常用工具" "git vim htop…"
-        menu_item 10 "全網 Top3 腳本" "融合怪·換源·kejilion" 1
+        menu_item 6 "系統更新" "apt/dnf/yum"
+        menu_item 7 "系統清理" "緩存 · journal"
+        menu_item 8 "BBR 加速" "開機第一件事" 1
+        menu_item 9 "Swap" "小內存剛需" 1
+        menu_item 10 "時區/DNS"
+        menu_item 11 "基礎工具" "curl vim htop fail2ban"
+        menu_item 12 "SSH 安全加固" "端口·fail2ban·UFW·vps-audit" 1
         menu_group "Docker"
-        menu_item 11 "Docker 環境" "安裝/狀態" 1
-        menu_item 12 "容器管理" "啟停/日誌/刪除"
-        menu_item 13 "鏡像清理" "system prune"
+        menu_item 13 "Docker 環境" "安裝/卸載/狀態" 1
+        menu_item 14 "容器管理"
+        menu_item 15 "鏡像清理" "prune"
         menu_group "站點輕量"
-        menu_item 14 "nginx 反代" "域名 → 上游" 1
-        menu_item 15 "SSL 證書" "certbot 輔助"
-        menu_item 16 "部署 Demo" "nginx 驗證頁"
-        menu_group "維護"
-        menu_item 17 "檢查更新"
-        menu_item 18 "快捷命令 x" "類 kejilion 的 k"
-        menu_item 19 "卸載"
+        menu_item 16 "nginx 反代" "域名 → 上游" 1
+        menu_item 17 "SSL 證書" "certbot 輔助"
+        menu_item 18 "部署 Demo" "驗證頁"
+        menu_group "工具箱"
+        menu_item 19 "精選腳本入口" "審計·nench·融合怪·換源" 1
+        menu_item 20 "檢查更新"
+        menu_item 21 "快捷命令 x"
+        menu_item 22 "卸載"
         menu_item 0 "退出"
         divider
         printf '請輸入選項: '
 
         local choice
-        read -r choice || { printf '\n'; break; }
+        read -r choice || { printf '
+'; break; }
         case "$choice" in
             1)  module_sysinfo;      pause ;;
-            2)  module_speedtest;    pause ;;
-            3)  module_route;        pause ;;
-            4)  module_sys_update;   pause ;;
-            5)  module_sys_clean;    pause ;;
-            6)  module_bbr;          pause ;;
-            7)  module_swap;         pause ;;
-            8)  module_tz_dns;       pause ;;
-            9)  section "常用工具"; install_common_tools; pause ;;
-            10) module_script_hub;   pause ;;
-            11) module_docker_hub;   pause ;;
-            12) module_docker_ps;    pause ;;
-            13) module_docker_prune; pause ;;
-            14) module_nginx_proxy;  pause ;;
-            15) module_ssl_helper;   pause ;;
-            16) module_demo;         pause ;;
-            17) check_update;        pause ;;
-            18) module_shortcut;     pause ;;
-            19) uninstall_all ;;
+            2)  module_bench;        pause ;;
+            3)  module_unlock;       pause ;;
+            4)  module_speedtest;    pause ;;
+            5)  module_route;        pause ;;
+            6)  module_sys_update;   pause ;;
+            7)  module_sys_clean;    pause ;;
+            8)  module_bbr;          pause ;;
+            9)  module_swap;         pause ;;
+            10) module_tz_dns;       pause ;;
+            11) install_common_tools; pause ;;
+            12) module_ssh_harden;   pause ;;
+            13) module_docker_hub;   pause ;;
+            14) module_docker_ps;    pause ;;
+            15) module_docker_prune; pause ;;
+            16) module_nginx_proxy;  pause ;;
+            17) module_ssl_helper;   pause ;;
+            18) module_demo;         pause ;;
+            19) module_script_hub;   pause ;;
+            20) check_update;        pause ;;
+            21) module_shortcut;     pause ;;
+            22) uninstall_all ;;
             0)  info "再見。"; break ;;
             *)  warn "無效選項：${choice}" ;;
         esac

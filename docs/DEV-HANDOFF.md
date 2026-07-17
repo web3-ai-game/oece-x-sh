@@ -13,7 +13,7 @@ cd /root/oece-x-sh
 # 真 root 是 roo；root 帳戶是蜜罐
 ```
 
-當前版本：**v1.2.0**（Sub2API 模塊已撤回）。
+當前版本：**v1.3.1**（Sub2API 模塊已撤回）。
 
 ---
 
@@ -21,7 +21,7 @@ cd /root/oece-x-sh
 
 | 交付物 | 位置 | 狀態 |
 |--------|------|------|
-| 主腳本 v1.2.0 | `oece-x.sh` | ShellCheck 0 · 運維精選 + Top3 入口 + 動畫 |
+| 主腳本 v1.3.1 | `oece-x.sh` | ShellCheck 0 · 運維精選 + Top3 入口 + 動畫 |
 | 短命令 | `bash <(curl -sL oece-x.com/x)` | `/opt/oece-x-web/oece-x.sh` |
 | 首頁展示 | oece-x.com/#script | 終端擬真 |
 | 倉庫 | github.com/web3-ai-game/oece-x-sh | main |
@@ -96,7 +96,7 @@ cd /root/oece-x-sh
 |------|------|
 | 1.0.0 | 體檢五件套 |
 | 1.1.0 | Sub2API（**已撤回**，勿再合入） |
-| 1.2.0 | 精選運維 + 酷炫動畫 + Top3 漢化入口 |
+| 1.3.1 | 精選運維 + 酷炫動畫 + Top3 漢化入口 |
 
 ---
 
@@ -115,3 +115,11 @@ cd /root/oece-x-sh
 - [ ] apt 安全更新  
 - [ ] BBR（可用腳本選單 6）  
 - [ ] 撤銷臨時 automation 公鑰  
+
+## v1.3.x 增補
+
+- 彩虹塊字 Logo 開場（OECE_NO_ANIM=1 可關）
+- SSH 加固 + vernu/vps-audit 入口
+- 跑分 + nench；解鎖/IP 質量檢測（無 WARP）
+- 精選腳本入口：LinuxMirrors / ecs / kejilion / vps-audit / nench
+- **不做** WARP / Argo 隧道（合規紅線）；無域名場景用 IP:端口 + 反代

@@ -13,7 +13,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash%204%2B-4EAA25?logo=gnubash&logoColor=white)](oece-x.sh)
 [![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen?logo=gnu&logoColor=white)](https://www.shellcheck.net/)
-[![Version](https://img.shields.io/badge/Version-1.2.0-7c4dff)](oece-x.sh)
+[![Version](https://img.shields.io/badge/Version-1.3.1-7c4dff)](oece-x.sh)
 [![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu%20%7C%20CentOS-informational?logo=linux&logoColor=white)](#-系統需求)
 [![Arch](https://img.shields.io/badge/Arch-amd64%20%7C%20arm64-orange)](#-系統需求)
 
@@ -64,14 +64,17 @@ OECE_NO_ANIM=1 bash <(curl -sL oece-x.com/x)
 | 7 | **Swap** | 建立 / 刪除 swapfile | Virtual memory |
 | 8 | **時區 / DNS** | timedatectl · 公共 DNS | Timezone & DNS |
 | 9 | **常用工具** | git vim htop… | Essentials |
-| **10** | **全網 Top3 腳本** ★ | 漢化一鍵腳本入口（見下） | Top3 CN launchers |
+| **10→19** | **精選腳本入口** ★ | 融合怪·換源·kejilion·**vps-audit**·**nench** | Audit + nench + CN tools |
+| **12** | **SSH 安全加固** ★ | 改端口 · 禁密碼 root · fail2ban · UFW · 審計 | SSH harden |
+| **2** | **性能跑分** ★ | CPU/磁碟/記憶體 + nench | Bench |
+| **3** | **解鎖/IP 質量** ★ | Netflix/ChatGPT 可達性（無代理） | Unlock probe |
 | 11–13 | **Docker** | 安裝 · 容器 · prune | Docker lite |
 | 14–16 | **站點** | nginx 反代 · SSL · Demo | Proxy / cert / demo |
 | 17–19 | **維護** | 更新腳本 · 快捷 `x` · 卸載 | Maintain |
 
 ---
 
-## 🌐 全網 Top3 · 漢化腳本入口（選單 10）
+## 🌐 精選腳本入口（選單 19）
 
 按 **GitHub 熱度 + 中文界面 + 有 VPS 即可 curl 安裝** 篩選（非付費推廣，star 數隨時間浮動）：
 
@@ -80,6 +83,8 @@ OECE_NO_ANIM=1 bash <(curl -sL oece-x.com/x)
 | 1 | [SuperManito/LinuxMirrors](https://github.com/SuperManito/LinuxMirrors) | ~7.6k | 換軟體源 / Docker 源 | `bash <(curl -sSL https://linuxmirrors.cn/main.sh)` |
 | 2 | [spiritLHLS/ecs](https://github.com/spiritLHLS/ecs) 融合怪 | ~7.0k | 綜合伺服器測評（中文菜單） | `curl -L …/ecs.sh -o ecs.sh && bash ecs.sh` |
 | 3 | [kejilion/sh](https://github.com/kejilion/sh) | ~3.0k | 全能運維工具箱（**繁中 tw**） | `bash <(curl -sL kejilion.sh) tw` |
+| 4 | [vernu/vps-audit](https://github.com/vernu/vps-audit) | ~2.3k | **無依賴安全審計**（差異化） | raw `vps-audit.sh` |
+| 5 | [n-st/nench](https://github.com/n-st/nench) | classic | CPU/IO/網路經典測評 | `nench.sh` |
 
 **oece-x 的做法**：下載 → `bash -n` 語法校驗 → 二次 `yes` 確認 → 執行；**不內嵌**對方源碼。  
 第三方腳本可能含本項目刻意不做的功能（如 WARP 等），請自行甄別。
@@ -92,10 +97,9 @@ OECE_NO_ANIM=1 bash <(curl -sL oece-x.com/x)
 
 TTY 下約 1.5–2.5 秒：
 
-1. 矩陣雨掃描  
-2. OECE ASCII Logo 逐行 + 掃描高亮  
-3. 真實 kernel/arch 進度條  
-4. 打字機版本條  
+1. 大號 **OECE-X** 塊字 + 256 色彩虹色波（類 hydra/lolcat 經典工具開場）  
+2. 底部蛇形 loading 條  
+3. 定格雙色 Logo + 版本框  
 
 `OECE_NO_ANIM=1` 或 `OECE_FAST=1` 或非 TTY（管道）→ 直接進選單。
 
@@ -110,7 +114,7 @@ TTY 下約 1.5–2.5 秒：
  | |  | |  __|| |   |  __| |_____|/  \
  | |__| | |___| |___| |____      /  /\ \
   \____/|______\____|______|    /__/  \_\
-  oece-x.sh v1.2.0 · VPS 體檢與運維精選
+  oece-x.sh v1.3.1 · VPS 體檢與運維精選
 
 ── 體檢與網路 ──
  1) 系統體檢 ★    2) 網路測速    3) 回程路由
