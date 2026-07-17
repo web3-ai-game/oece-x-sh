@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# 測試產物
+*.log
+test-output/
+
+# 本地雜項
+.env
