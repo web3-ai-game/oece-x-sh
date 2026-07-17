@@ -107,22 +107,22 @@ bash <(curl -sSL https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/o
  上傳          14.63 Mbps
 ```
 
-**回程路由（NextTrace 標註 AS 與線路歸屬）**
+**回程路由（NextTrace 標註 AS 與線路歸屬，新加坡 DigitalOcean 真機）**
 
 ```text
 ▶ 上海移動（211.136.112.200）
 ────────────────────────────────────────────────────────
-16  149.14.199.194  AS174    [COGENT-149]  英國 斯勞  Cogent-CMI-Peer
-17  223.120.11.50   AS58453  [CMI-INT]     英國 倫敦  cmi.chinamobile.com  移動
-20  221.183.89.33   AS9808   [CMNET]       中國 上海  chinamobileltd.com   移動
-24  211.136.112.252 AS24400  [CMNET]       中國 上海  sh.10086.cn          移動
-25  211.136.112.200 AS24400  [CMNET]       中國 上海  浦東新區 sh.10086.cn  移動
+1   103.253.144.131 AS14061  [DIGITALOCEAN-AP]  新加坡              1.31 ms
+10  223.120.2.117   AS58453  [CMI-INT]   中國 香港  cmi.chinamobile.com  移動   32.62 ms
+11  223.120.3.202   AS58453  [CMI-INT]   中國 上海  cmi.chinamobile.com  移動   56.94 ms
+13  221.183.89.33   AS9808   [CMNET]     中國 上海  chinamobileltd.com   移動   61.25 ms
+18  211.136.112.200 AS24400  [CMNET]     中國 上海  浦東新區 sh.10086.cn  移動  210.11 ms
 
 [資訊] 線路速查：CN2 GIA(59.43.*且少跳) > CN2 GT(59.43.*) ≈ 聯通9929(AS9929)
        ≈ 移動CMIN2(AS58807) > 電信163(202.97.*) ≈ 聯通4837 ≈ 移動CMI(AS58453)
 ```
 
-一眼看穿：這條線在倫敦交接給移動國際（CMI，AS58453）——普通線路，不是 CMIN2。
+一眼看穿：這台新加坡機到移動走 **CMI 香港直連（~60ms 進上海）**，同機到電信卻走 163 骨幹 ~300ms、聯通繞美 ~366ms——**同一台 VPS，三網體驗天差地別**，這正是買機前要自測回程的原因。
 <!-- PREVIEW:END -->
 
 ---
@@ -267,10 +267,11 @@ bash <(curl -sSL https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/o
 
 ---
 
-## 📺 相關教學
+## 📺 相關連結
 
+- 官網展示 → [oece-x.com](https://oece-x.com/#script)（首頁「代表作品」區，一鍵複製命令）
 - 影片教學 → [YouTube @oece-x](https://www.youtube.com/@oece-x)
-- 更多內容 → [oece-x.com](https://oece-x.com)
+- 開發文檔 → [docs/DEV-HANDOFF.md](docs/DEV-HANDOFF.md)（架構導讀 · 發版 SOP · 基礎設施地圖）
 
 ---
 
