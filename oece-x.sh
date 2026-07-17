@@ -3,7 +3,7 @@
 #  oece-x.sh — VPS 體檢與一鍵部署測試工具
 #
 #  幫你在 3 分鐘內判斷一台 VPS 到底能不能用、值不值。
-#  系統體檢 · 網路測速 · 回程路由 · 環境安裝 · 部署 Demo
+#  系統體檢 · 網路測速 · 回程路由 · 環境安裝 · 部署 Demo · Sub2API
 #
 #  Project : https://github.com/web3-ai-game/oece-x-sh
 #  Channel : YouTube @oece-x · https://oece-x.com
@@ -12,7 +12,7 @@
 #  本工具不含任何繞過網路封鎖之功能，僅供 VPS 測試與學習用途。
 #=======================================================================
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/oece-x.sh"
 
 set -Eeuo pipefail
@@ -25,6 +25,18 @@ OECE_BIN="${OECE_HOME}/bin"
 OECE_DEMO_DIR="${OECE_HOME}/demo"
 DEMO_CONTAINER="oece-x-demo"
 DEMO_PORT_DEFAULT="8888"
+
+# Sub2API（官方 Docker Compose 一鍵部署封裝）
+# 上游: https://github.com/Wei-Shaw/sub2api
+# 安裝目錄刻意不用 /opt/sub2api，避免與本機已有 api.oece-x.com 實例衝突
+SUB2API_DIR_DEFAULT="/opt/oece-sub2api"
+SUB2API_PROJECT="oece-sub2api"
+SUB2API_PORT_DEFAULT="8080"
+SUB2API_GH_RAW="https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy"
+SUB2API_COMPOSE_URL="${SUB2API_GH_RAW}/docker-compose.local.yml"
+SUB2API_ENV_EXAMPLE_URL="${SUB2API_GH_RAW}/.env.example"
+SUB2API_CRED_FILE="${OECE_HOME}/sub2api-credentials.txt"
+SUB2API_DUCKDNS_FILE="${OECE_HOME}/duckdns.env"
 
 # NextTrace（開源回程路由工具）— 釘死版本 + 內嵌 SHA256 校驗
 # 來源: https://github.com/nxtrace/NTrace-core/releases
@@ -841,6 +853,594 @@ module_demo() {
     disclaimer
 }
 
+
+#=======================================================================
+# 模塊 6 · Sub2API 傻瓜式部署
+#=======================================================================
+# 無域名默認 IP:端口；sslip.io 零申請偽域名；DuckDNS 半自動免費子域。
+# 不在生產機覆蓋 /opt/sub2api（本項目 api.oece-x.com 已佔用）。
+
+s2a_dir() {
+    printf '%s' "${SUB2API_DIR:-$SUB2API_DIR_DEFAULT}"
+}
+
+s2a_compose() {
+    # 統一 compose 入口：優先 docker compose 插件
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -p "$SUB2API_PROJECT" -f "$(s2a_dir)/docker-compose.yml" "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose -p "$SUB2API_PROJECT" -f "$(s2a_dir)/docker-compose.yml" "$@"
+    else
+        err "未找到 docker compose / docker-compose"
+        return 1
+    fi
+}
+
+s2a_require_docker() {
+    if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+        warn "需要 Docker 運行環境。"
+        if confirm "現在安裝 Docker + Compose？"; then
+            install_docker || return 1
+        else
+            info "請先在「環境一鍵安裝」中安裝 Docker。"
+            return 1
+        fi
+    fi
+    if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+        warn "未檢出 Compose。"
+        if confirm "安裝 docker-compose-plugin？"; then
+            pkg_install docker-compose-plugin || return 1
+        else
+            return 1
+        fi
+    fi
+    return 0
+}
+
+s2a_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$" && return 0
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$" && return 0
+    fi
+    return 1
+}
+
+s2a_mem_mb() {
+    awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || printf '0'
+}
+
+# 按記憶體分檔：輸出 shared_buffers|effective_cache|max_open|max_idle|redis_pool|redis_min_idle|max_conn
+s2a_mem_profile() {
+    local mb
+    mb=$(s2a_mem_mb)
+    if [ "$mb" -lt 1800 ] 2>/dev/null; then
+        printf '128MB|512MB|32|16|128|8|100'
+    elif [ "$mb" -lt 3800 ] 2>/dev/null; then
+        printf '256MB|1GB|64|32|256|16|200'
+    elif [ "$mb" -lt 7800 ] 2>/dev/null; then
+        printf '512MB|2GB|128|64|1024|64|512'
+    else
+        printf '1GB|4GB|256|128|4096|256|1024'
+    fi
+}
+
+s2a_env_set() {
+    local file="$1" key="$2" val="$3"
+    if grep -qE "^${key}=" "$file" 2>/dev/null; then
+        # 用 awk 覆寫，避免 sed 特殊字元問題
+        local tmp
+        tmp=$(mktemp)
+        awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}' "$file" > "$tmp"
+        mv "$tmp" "$file"
+    else
+        printf '%s=%s\n' "$key" "$val" >> "$file"
+    fi
+}
+
+s2a_gen_secret() {
+    openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
+s2a_gen_password() {
+    # URL/終端友好密碼（無易混淆字元）
+    openssl rand -base64 18 2>/dev/null | tr -d '/+=' | head -c 20
+}
+
+s2a_sslip_host() {
+    local ip="$1"
+    # 157.230.249.136 → 157-230-249-136.sslip.io
+    printf '%s.sslip.io' "$(printf '%s' "$ip" | tr '.' '-')"
+}
+
+s2a_is_installed() {
+    [ -f "$(s2a_dir)/docker-compose.yml" ] && [ -f "$(s2a_dir)/.env" ]
+}
+
+s2a_patch_compose_names() {
+    local f="$1"
+    # 避免與官方默認 container_name（sub2api*）及本機 api.oece-x.com 實例衝突
+    sed -i \
+        -e 's/container_name:[[:space:]]*sub2api-postgres/container_name: oece-sub2api-postgres/' \
+        -e 's/container_name:[[:space:]]*sub2api-redis/container_name: oece-sub2api-redis/' \
+        -e 's/container_name:[[:space:]]*sub2api$/container_name: oece-sub2api/' \
+        -e 's/container_name:[[:space:]]*sub2api[[:space:]]*$/container_name: oece-sub2api/' \
+        "$f"
+    # 網路名隔離
+    sed -i 's/sub2api-network/oece-sub2api-network/g' "$f"
+}
+
+s2a_detect_foreign_instance() {
+    # 提示本機可能已有非本腳本管理的 Sub2API
+    local found=0
+    if [ -d /opt/sub2api ] && [ "$(s2a_dir)" != "/opt/sub2api" ]; then
+        warn "偵測到 /opt/sub2api（可能是獨立部署，如 api.oece-x.com）。"
+        found=1
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'sub2api'; then
+            warn "偵測到容器名 sub2api（非本腳本的 oece-sub2api 前綴）。"
+            found=1
+        fi
+    fi
+    if [ "$found" -eq 1 ]; then
+        info "本腳本安裝到 $(s2a_dir)，容器前綴 oece-sub2api，默認不會覆蓋上述實例。"
+        info "請務必選用空閒端口（若 8080 已被佔用會自動提示）。"
+        printf '\n'
+    fi
+}
+
+s2a_read_env() {
+    local key="$1" file
+    file="$(s2a_dir)/.env"
+    [ -f "$file" ] || return 0
+    awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,""); print; exit}' "$file"
+}
+
+s2a_print_access() {
+    local port bind ipv4 sslip
+    port=$(s2a_read_env SERVER_PORT)
+    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
+    bind=$(s2a_read_env BIND_HOST)
+    [ -z "$bind" ] && bind="0.0.0.0"
+    ipv4=$(get_public_ip 4)
+    [ -z "$ipv4" ] && ipv4="<公網IP>"
+
+    section "訪問地址"
+    kv "綁定" "${bind}:${port}"
+    kv "本機" "http://127.0.0.1:${port}"
+    if [ "$bind" = "127.0.0.1" ]; then
+        warn "目前僅本機可訪問。若需公網，請到子選單改綁 0.0.0.0，或自建反代。"
+    else
+        kv "公網 IP" "http://${ipv4}:${port}"
+        if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            sslip=$(s2a_sslip_host "$ipv4")
+            kv "sslip.io" "http://${sslip}:${port}"
+            kv "nip.io" "http://${ipv4}.nip.io:${port}"
+            info "sslip.io / nip.io 為零註冊偽域名（IP 寫進主機名），無需申請。"
+        fi
+    fi
+    if [ -f "$SUB2API_DUCKDNS_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$SUB2API_DUCKDNS_FILE" 2>/dev/null || true
+        if [ -n "${DUCKDNS_DOMAIN:-}" ]; then
+            kv "DuckDNS" "http://${DUCKDNS_DOMAIN}.duckdns.org:${port}"
+        fi
+    fi
+    printf '\n'
+    if [ -f "$SUB2API_CRED_FILE" ]; then
+        info "管理員帳密見：${SUB2API_CRED_FILE}"
+        # 僅展示郵箱，密碼不在狀態裡重複刷屏（安裝時已打印）
+        local email
+        email=$(awk -F= '/^ADMIN_EMAIL=/{print $2; exit}' "$SUB2API_CRED_FILE" 2>/dev/null || true)
+        [ -n "$email" ] && kv "管理員郵箱" "$email"
+    fi
+    info "若公網打不開：檢查雲廠商安全組 / ufw 是否放行 TCP ${port}。"
+}
+
+s2a_write_credentials() {
+    local email="$1" pass="$2" port="$3"
+    mkdir -p "$OECE_HOME"
+    umask 077
+    cat > "$SUB2API_CRED_FILE" <<EOF
+# oece-x.sh Sub2API credentials — $(date -Iseconds 2>/dev/null || date)
+# 請勿截圖發佈到公開頻道
+INSTALL_DIR=$(s2a_dir)
+ADMIN_EMAIL=${email}
+ADMIN_PASSWORD=${pass}
+SERVER_PORT=${port}
+EOF
+    chmod 600 "$SUB2API_CRED_FILE"
+}
+
+s2a_install() {
+    section "Sub2API 一鍵安裝"
+    s2a_require_docker || return 0
+    s2a_detect_foreign_instance
+
+    if s2a_is_installed; then
+        warn "已存在安裝目錄：$(s2a_dir)"
+        if ! confirm "重新生成配置並重裝容器？（數據目錄可選擇保留）"; then
+            info "已取消"
+            return 0
+        fi
+        if confirm "停止並移除現有 oece-sub2api 容器？"; then
+            s2a_compose down 2>/dev/null || true
+        fi
+    fi
+
+    local mem_mb profile
+    mem_mb=$(s2a_mem_mb)
+    profile=$(s2a_mem_profile)
+    info "偵測記憶體約 ${mem_mb} MB，將套用對應資源檔以適配小 VPS。"
+    if [ "$mem_mb" -gt 0 ] && [ "$mem_mb" -lt 1500 ]; then
+        warn "記憶體 < 1.5GB，Sub2API（含 Postgres+Redis）可能吃緊，建議 ≥2GB。"
+        confirm "仍要繼續？" || { info "已取消"; return 0; }
+    fi
+
+    local port
+    printf '請輸入對外端口 [%s]: ' "$SUB2API_PORT_DEFAULT"
+    read -r port || port=""
+    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
+    case "$port" in
+        ''|*[!0-9]*) err "端口必須是數字"; return 1 ;;
+    esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        err "端口範圍 1-65535"
+        return 1
+    fi
+    if s2a_port_in_use "$port"; then
+        err "端口 ${port} 已被佔用。若本機已有 api 反代/Sub2API，請換端口（如 18080）。"
+        return 1
+    fi
+
+    local email pass
+    printf '管理員郵箱 [%s]: ' "admin@localhost"
+    read -r email || email=""
+    [ -z "$email" ] && email="admin@localhost"
+    pass=$(s2a_gen_password)
+    [ -z "$pass" ] && pass=$(s2a_gen_secret | head -c 16)
+
+    local dir
+    dir=$(s2a_dir)
+    mkdir -p "$dir" "$dir/data" "$dir/postgres_data" "$dir/redis_data"
+
+    info "下載官方 docker-compose 與 .env 模板..."
+    safe_download "$SUB2API_COMPOSE_URL" "${dir}/docker-compose.yml" || return 1
+    safe_download "$SUB2API_ENV_EXAMPLE_URL" "${dir}/.env.example" || return 1
+    s2a_patch_compose_names "${dir}/docker-compose.yml"
+
+    cp "${dir}/.env.example" "${dir}/.env"
+    chmod 600 "${dir}/.env"
+
+    local jwt totp pgpass
+    jwt=$(s2a_gen_secret)
+    totp=$(s2a_gen_secret)
+    pgpass=$(s2a_gen_secret)
+
+    local sb ecache mop mid rpool rmin pmax
+    IFS='|' read -r sb ecache mop mid rpool rmin pmax <<< "$profile"
+
+    s2a_env_set "${dir}/.env" "BIND_HOST" "0.0.0.0"
+    s2a_env_set "${dir}/.env" "SERVER_PORT" "$port"
+    s2a_env_set "${dir}/.env" "ADMIN_EMAIL" "$email"
+    s2a_env_set "${dir}/.env" "ADMIN_PASSWORD" "$pass"
+    s2a_env_set "${dir}/.env" "JWT_SECRET" "$jwt"
+    s2a_env_set "${dir}/.env" "TOTP_ENCRYPTION_KEY" "$totp"
+    s2a_env_set "${dir}/.env" "POSTGRES_PASSWORD" "$pgpass"
+    s2a_env_set "${dir}/.env" "POSTGRES_SHARED_BUFFERS" "$sb"
+    s2a_env_set "${dir}/.env" "POSTGRES_EFFECTIVE_CACHE_SIZE" "$ecache"
+    s2a_env_set "${dir}/.env" "POSTGRES_MAX_CONNECTIONS" "$pmax"
+    s2a_env_set "${dir}/.env" "DATABASE_MAX_OPEN_CONNS" "$mop"
+    s2a_env_set "${dir}/.env" "DATABASE_MAX_IDLE_CONNS" "$mid"
+    s2a_env_set "${dir}/.env" "REDIS_POOL_SIZE" "$rpool"
+    s2a_env_set "${dir}/.env" "REDIS_MIN_IDLE_CONNS" "$rmin"
+    s2a_env_set "${dir}/.env" "TZ" "Asia/Shanghai"
+
+    s2a_write_credentials "$email" "$pass" "$port"
+
+    info "拉取鏡像並啟動（首次可能需數分鐘）..."
+    if ! ( cd "$dir" && s2a_compose pull ); then
+        err "鏡像拉取失敗，請檢查網路（需能訪問 Docker Hub / ghcr 鏡像源）。"
+        return 1
+    fi
+    if ! ( cd "$dir" && s2a_compose up -d ); then
+        err "啟動失敗，請執行：cd ${dir} && docker compose -p ${SUB2API_PROJECT} logs"
+        return 1
+    fi
+
+    info "等待健康檢查（最長約 120 秒）..."
+    local http_code=000
+    for _ in $(seq 1 40); do
+        http_code=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "http://127.0.0.1:${port}/health" 2>/dev/null) || http_code="000"
+        if [ "$http_code" = "200" ]; then
+            break
+        fi
+        # 首頁 200/302 也算起來了
+        http_code=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null) || http_code="000"
+        case "$http_code" in
+            200|301|302|303|307|308) break ;;
+        esac
+        sleep 3
+    done
+
+    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ] \
+        || [ "$http_code" = "303" ] || [ "$http_code" = "307" ] || [ "$http_code" = "308" ]; then
+        ok "Sub2API 已啟動（HTTP ${http_code}）"
+    else
+        warn "容器已啟動但健康檢查超時（HTTP ${http_code}）。可稍後在「狀態/日誌」查看。"
+        warn "常見原因：鏡像拉取慢、磁碟慢、記憶體不足。"
+    fi
+
+    printf '\n'
+    ok "安裝完成"
+    kv "安裝目錄" "$dir"
+    kv "管理員郵箱" "$email"
+    kv "管理員密碼" "$pass"
+    kv "憑證檔案" "$SUB2API_CRED_FILE"
+    printf '\n'
+    s2a_print_access
+    warn "請立即保存管理員密碼；完整密鑰在 ${dir}/.env（chmod 600）。"
+    info "上游項目：https://github.com/Wei-Shaw/sub2api"
+}
+
+s2a_status() {
+    section "Sub2API 狀態"
+    if ! s2a_is_installed; then
+        warn "尚未通過本腳本安裝（目錄 $(s2a_dir) 不完整）。"
+        s2a_detect_foreign_instance
+        return 0
+    fi
+    s2a_require_docker || return 0
+    s2a_compose ps 2>/dev/null || docker ps -a --filter "name=oece-sub2api" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+    printf '\n'
+    s2a_print_access
+}
+
+s2a_logs() {
+    section "Sub2API 日誌"
+    s2a_is_installed || { warn "未安裝"; return 0; }
+    s2a_require_docker || return 0
+    info "顯示最近 80 行（Ctrl+C 不影響服務）..."
+    s2a_compose logs --tail=80 sub2api 2>/dev/null || s2a_compose logs --tail=80
+}
+
+s2a_update() {
+    section "更新 Sub2API 鏡像"
+    s2a_is_installed || { warn "未安裝"; return 0; }
+    s2a_require_docker || return 0
+    confirm "拉取 latest 並重啟容器？" || { info "已取消"; return 0; }
+    s2a_compose pull && s2a_compose up -d
+    ok "更新流程已執行"
+    s2a_print_access
+}
+
+s2a_rebind() {
+    section "修改綁定 / 端口"
+    s2a_is_installed || { warn "未安裝"; return 0; }
+    s2a_require_docker || return 0
+
+    local cur_bind cur_port new_bind new_port
+    cur_bind=$(s2a_read_env BIND_HOST)
+    cur_port=$(s2a_read_env SERVER_PORT)
+    [ -z "$cur_bind" ] && cur_bind="0.0.0.0"
+    [ -z "$cur_port" ] && cur_port="$SUB2API_PORT_DEFAULT"
+    info "當前：${cur_bind}:${cur_port}"
+    printf ' 1) 公網可訪 0.0.0.0（無域名直連）\n'
+    printf ' 2) 僅本機 127.0.0.1（配合 nginx/Caddy 反代）\n'
+    printf ' 3) 只改端口\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    new_bind="$cur_bind"
+    new_port="$cur_port"
+    case "$c" in
+        1) new_bind="0.0.0.0" ;;
+        2) new_bind="127.0.0.1" ;;
+        3) : ;;
+        *) return 0 ;;
+    esac
+    printf '端口 [%s]: ' "$cur_port"
+    read -r new_port || new_port=""
+    [ -z "$new_port" ] && new_port="$cur_port"
+    case "$new_port" in
+        ''|*[!0-9]*) err "端口無效"; return 1 ;;
+    esac
+    if [ "$new_port" != "$cur_port" ] && s2a_port_in_use "$new_port"; then
+        err "端口 ${new_port} 已被佔用"
+        return 1
+    fi
+    s2a_env_set "$(s2a_dir)/.env" "BIND_HOST" "$new_bind"
+    s2a_env_set "$(s2a_dir)/.env" "SERVER_PORT" "$new_port"
+    if [ -f "$SUB2API_CRED_FILE" ]; then
+        s2a_env_set "$SUB2API_CRED_FILE" "SERVER_PORT" "$new_port" 2>/dev/null || true
+    fi
+    info "重啟容器使配置生效..."
+    s2a_compose up -d
+    ok "已更新為 ${new_bind}:${new_port}"
+    s2a_print_access
+}
+
+s2a_duckdns_setup() {
+    section "DuckDNS 免費子域名"
+    info "DuckDNS 提供免費 *.duckdns.org 子域（需免費帳號，非全自動搶註）。"
+    info "步驟：瀏覽器打開 https://www.duckdns.org → 登入 → 建立 subdomain → 複製 token"
+    printf '\n'
+    local domain token ip
+    printf '子域名（不含 .duckdns.org）: '
+    read -r domain || domain=""
+    domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+    if [ -z "$domain" ]; then
+        err "子域名無效"
+        return 1
+    fi
+    printf 'DuckDNS token: '
+    read -r token || token=""
+    if [ -z "$token" ]; then
+        err "token 不能為空"
+        return 1
+    fi
+    ip=$(get_public_ip 4)
+    if [ -z "$ip" ]; then
+        err "無法取得公網 IP"
+        return 1
+    fi
+    info "更新 ${domain}.duckdns.org → ${ip} ..."
+    local resp
+    resp=$(curl -fsS --max-time 15 \
+        "https://www.duckdns.org/update?domains=${domain}&token=${token}&ip=${ip}" 2>/dev/null) || resp="fail"
+    if [ "$resp" = "OK" ]; then
+        ok "DuckDNS 更新成功"
+    else
+        err "DuckDNS 更新失敗（回應: ${resp}）。請檢查 token / 子域名是否正確。"
+        return 1
+    fi
+
+    mkdir -p "$OECE_HOME"
+    umask 077
+    cat > "$SUB2API_DUCKDNS_FILE" <<EOF
+# managed by oece-x.sh
+DUCKDNS_DOMAIN=${domain}
+DUCKDNS_TOKEN=${token}
+EOF
+    chmod 600 "$SUB2API_DUCKDNS_FILE"
+
+    # 可選：systemd timer 或 cron 保活動態 IP
+    if confirm "安裝每 5 分鐘自動更新 IP 的 cron？（適合動態公網 IP）"; then
+        local cron_line
+        cron_line="*/5 * * * * root curl -fsS \"https://www.duckdns.org/update?domains=${domain}&token=${token}&ip=\" >/dev/null 2>&1"
+        if [ -d /etc/cron.d ]; then
+            printf '%s\n' "$cron_line" > /etc/cron.d/oece-duckdns
+            chmod 644 /etc/cron.d/oece-duckdns
+            ok "已寫入 /etc/cron.d/oece-duckdns"
+        else
+            warn "無 /etc/cron.d，請手動添加 cron：${cron_line}"
+        fi
+    fi
+
+    local port
+    port=$(s2a_read_env SERVER_PORT)
+    [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
+    kv "訪問" "http://${domain}.duckdns.org:${port}"
+    info "DNS 全球生效通常 < 1 分鐘。HTTPS 請自行用 Caddy/certbot（本版不做一鍵簽章）。"
+}
+
+s2a_access_menu() {
+    section "訪問方式（無域名友好）"
+    if s2a_is_installed; then
+        s2a_print_access
+    else
+        warn "尚未安裝 Sub2API；仍可先配置 DuckDNS 或查看偽域名說明。"
+        local ipv4
+        ipv4=$(get_public_ip 4)
+        if [[ "${ipv4}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            kv "sslip.io 示例" "http://$(s2a_sslip_host "$ipv4"):8080"
+        fi
+    fi
+    printf '\n'
+    printf ' 1) 重新顯示 IP / sslip.io / nip.io 地址\n'
+    printf ' 2) 配置 DuckDNS 免費子域名（需 token）\n'
+    printf ' 3) 自有域名指引（不改本機 nginx）\n'
+    printf ' 0) 返回\n\n請選擇: '
+    local c
+    read -r c || c="0"
+    case "$c" in
+        1) s2a_print_access ;;
+        2) s2a_duckdns_setup ;;
+        3)
+            section "自有域名指引"
+            local ip port
+            ip=$(get_public_ip 4)
+            port=$(s2a_read_env SERVER_PORT)
+            [ -z "$port" ] && port="$SUB2API_PORT_DEFAULT"
+            info "1. 在域名 DNS 添加 A 記錄指向 ${ip:-\<公網IP\>}"
+            info "2. 建議用 Caddy / nginx 反代到 127.0.0.1:${port}，並將 BIND 改為 127.0.0.1"
+            printf '\n示例 Caddyfile：\n'
+            cat <<EOF
+api.example.com {
+    reverse_proxy 127.0.0.1:${port}
+}
+EOF
+            printf '\n示例 nginx：\n'
+            cat <<EOF
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+    # ssl_certificate ...;
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+            info "本腳本不會自動修改系統 nginx，避免誤傷其他站點。"
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+s2a_uninstall() {
+    section "卸載 Sub2API（僅本腳本實例）"
+    if ! s2a_is_installed && ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^oece-sub2api'; then
+        info "未發現 oece-sub2api 實例。"
+        return 0
+    fi
+    info "將操作："
+    printf '  · compose project %s\n' "$SUB2API_PROJECT"
+    printf '  · 目錄 %s\n' "$(s2a_dir)"
+    printf '  %s不會動 /opt/sub2api 或容器名 sub2api（其他實例）%s\n\n' "$C_DIM" "$C_RESET"
+    confirm_danger "確認卸載本腳本部署的 Sub2API？" || { info "已取消"; return 0; }
+
+    if s2a_is_installed; then
+        s2a_compose down 2>/dev/null || true
+    fi
+    docker rm -f oece-sub2api oece-sub2api-postgres oece-sub2api-redis 2>/dev/null || true
+
+    if confirm "同時刪除數據目錄 $(s2a_dir)？（含數據庫，不可恢復）"; then
+        rm -rf "$(s2a_dir)"
+        ok "已刪除 $(s2a_dir)"
+    else
+        ok "容器已停，數據目錄保留"
+    fi
+    if [ -f "$SUB2API_CRED_FILE" ] && confirm "刪除憑證檔 ${SUB2API_CRED_FILE}？"; then
+        rm -f "$SUB2API_CRED_FILE"
+    fi
+    ok "卸載流程結束"
+}
+
+module_sub2api() {
+    section "部署 Sub2API（AI API 中轉 · 無域名友好）"
+    info "上游開源：Wei-Shaw/sub2api · Docker Compose 一鍵封裝"
+    info "安裝路徑默認 ${SUB2API_DIR_DEFAULT}（隔離前綴 oece-sub2api）"
+    printf '\n'
+    printf ' 1) 一鍵安裝 / 重裝\n'
+    printf ' 2) 訪問方式（IP / sslip.io / DuckDNS）\n'
+    printf ' 3) 狀態 / 帳號與地址\n'
+    printf ' 4) 日誌\n'
+    printf ' 5) 更新鏡像\n'
+    printf ' 6) 修改綁定與端口\n'
+    printf ' 7) 卸載本腳本實例\n'
+    printf ' 0) 返回\n\n'
+    printf '請選擇: '
+    local choice
+    read -r choice || choice="0"
+    case "$choice" in
+        1) printf '\n'; s2a_install ;;
+        2) printf '\n'; s2a_access_menu ;;
+        3) printf '\n'; s2a_status ;;
+        4) printf '\n'; s2a_logs ;;
+        5) printf '\n'; s2a_update ;;
+        6) printf '\n'; s2a_rebind ;;
+        7) printf '\n'; s2a_uninstall ;;
+        *) return 0 ;;
+    esac
+    disclaimer
+}
+
 #=======================================================================
 # 維護：更新檢查 / 卸載
 #=======================================================================
@@ -900,7 +1500,7 @@ uninstall_all() {
     if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$DEMO_CONTAINER"; then
         printf '  · Demo 容器 %s\n' "$DEMO_CONTAINER"
     fi
-    printf '  %s（不會動你的 Docker、系統包與任何業務數據）%s\n\n' "$C_DIM" "$C_RESET"
+    printf '  %s（不會動 Docker、系統包、Sub2API 業務實例；卸 Sub2API 請用選單 6→7）%s\n\n' "$C_DIM" "$C_RESET"
 
     confirm_danger "確認卸載 oece-x.sh 相關檔案？" || { info "已取消"; return 0; }
 
@@ -936,7 +1536,7 @@ print_banner() {
   \____/|______\____|______|    /__/  \_\
 BANNER
     printf '%s' "$C_RESET"
-    printf '%s  oece-x.sh v%s · VPS 體檢與一鍵部署測試工具%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
+    printf '%s  oece-x.sh v%s · VPS 體檢 · 部署測試 · Sub2API%s\n' "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
     printf '%s  YouTube @oece-x · oece-x.com%s\n' "$C_DIM" "$C_RESET"
 }
 
@@ -951,9 +1551,10 @@ main_menu() {
         printf ' 3) 回程路由檢測  %s 三網回程線路（NextTrace 標註 AS）%s\n' "$C_DIM" "$C_RESET"
         printf ' 4) 環境一鍵安裝  %s Docker / 常用工具%s\n' "$C_DIM" "$C_RESET"
         printf ' 5) 部署 Demo     %s 一鍵拉起 nginx 驗證頁%s\n' "$C_DIM" "$C_RESET"
+        printf ' 6) 部署 Sub2API  %s AI API 中轉 · 無域名友好%s\n' "$C_DIM" "$C_RESET"
         divider
-        printf ' 6) 檢查更新\n'
-        printf ' 7) 卸載\n'
+        printf ' 7) 檢查更新\n'
+        printf ' 8) 卸載\n'
         printf ' 0) 退出\n'
         divider
         printf '請輸入選項: '
@@ -966,8 +1567,9 @@ main_menu() {
             3) module_route;       pause ;;
             4) module_env_install; pause ;;
             5) module_demo;        pause ;;
-            6) check_update;       pause ;;
-            7) uninstall_all ;;
+            6) module_sub2api;     pause ;;
+            7) check_update;       pause ;;
+            8) uninstall_all ;;
             0) info "再見。"; break ;;
             *) warn "無效選項：${choice}" ;;
         esac
@@ -976,7 +1578,7 @@ main_menu() {
 
 usage() {
     cat <<EOF
-oece-x.sh v${SCRIPT_VERSION} — VPS 體檢與一鍵部署測試工具
+oece-x.sh v${SCRIPT_VERSION} — VPS 體檢與一鍵部署工具（含 Sub2API）
 
 用法:
   bash oece-x.sh            進入互動選單

@@ -30,7 +30,7 @@ gh auth login           # 選 HTTPS + token/瀏覽器授權
 
 | 交付物 | 位置 | 狀態 |
 |--------|------|------|
-| 主腳本 v1.0.0（~950 行單檔） | 倉庫 `oece-x.sh` | ✅ ShellCheck 0 告警 |
+| 主腳本 v1.1.0（~1600 行單檔） | 倉庫 `oece-x.sh` | ✅ ShellCheck 0 告警 · 含 Sub2API 模塊 |
 | GitHub 倉庫 | github.com/web3-ai-game/oece-x-sh | ✅ main 分支 |
 | 短命令 | `bash <(curl -sL oece-x.com/x)` | ✅ 全球可用（含大陸，不依賴 GitHub） |
 | 備用命令 | `bash <(curl -sSL https://raw.githubusercontent.com/web3-ai-game/oece-x-sh/main/oece-x.sh)` | ✅ |
@@ -84,7 +84,9 @@ docker
 
 | 關鍵點 | 位置/值 | 說明 |
 |--------|---------|------|
-| `SCRIPT_VERSION` | 檔頭 `"1.0.0"` | 發版必 bump；更新檢查靠它比對 |
+| `SCRIPT_VERSION` | 檔頭 `"1.1.0"` | 發版必 bump；更新檢查靠它比對 |
+| Sub2API 安裝根 | `/opt/oece-sub2api` | **故意不是** `/opt/sub2api`（生產 api.oece-x.com 佔用） |
+| Sub2API 容器前綴 | `oece-sub2api*` | compose project `oece-sub2api`；與官方默認名隔離 |
 | `SCRIPT_RAW_URL` | GitHub raw | 腳本內建「檢查更新」的來源 |
 | NextTrace 釘版 | `NEXTTRACE_VERSION="v1.7.1"` + amd64/arm64 兩個 SHA256 | **升級 NextTrace 必須重新下載算哈希改這三個常量**（上游 release 不出 checksums 檔） |
 | 三網節點 | `ROUTE_NODES_FULL/QUICK` 數組 | 北上廣×三網 9 個公開 landmark IP，加節點改這裡 |
@@ -116,21 +118,32 @@ cp oece-x.sh /opt/oece-x-web/oece-x.sh
 curl -s https://oece-x.com/x | grep SCRIPT_VERSION | head -1
 ```
 
-> 首頁展示區的版本號寫死在 index.html 的終端擬真裡（`v1.0.0`），大版本更新時記得順手改。
+> 首頁展示區的版本號寫死在 index.html 的終端擬真裡（現 `v1.1.0`），大版本更新時記得順手改。
 
 ---
 
-## 6. Roadmap（優先級建議）
+## 6. Sub2API 模塊注意（v1.1）
 
-1. **裝機計數器**（kejilion 的 496,211 次同款）：`grep -c 'GET /x ' /var/log/nginx/oece-x.access.log` 起步，之後 cron 累計到 json + 首頁 fetch 顯示
-2. **`x` 快捷命令**：腳本首跑時問「安裝快捷方式？」→ 寫 `/usr/local/bin/x`（kejilion 的 `k` 同款）
-3. 更多回程節點（成都/教育網）+ IPv6 路由 + 結果導出 Markdown
-4. **oece-x.sh 域名決策**：不必需（oece-x.com/x 已等效）；要純粹的 `bash <(curl -sL oece-x.sh)` 質感再買（.sh 約 US$60-90/年），nginx 加個 server block 指同一檔案即可
-5. Ookla 深度測速在首版是可選下載，考慮加 iperf3 自建節點模式
+- **生產實例**：本 VPS `/opt/sub2api` + 容器 `sub2api` → `api.oece-x.com`（nginx 反代 8080）。**禁止**在本機對腳本模塊做真實 `compose up` E2E 測裝，避免撞端口/容器名。
+- **腳本實例**：`/opt/oece-sub2api` + `oece-sub2api*`；默認端口仍 8080（佔用則換）。
+- **無域名**：IP 直連 + sslip.io/nip.io 展示 + DuckDNS（token 半自動）。HTTPS 一鍵未做。
+- **驗證策略**：本倉庫發版以 `bash -n` + ShellCheck 為準；實裝 E2E 請用乾淨測試機。
 
 ---
 
-## 7. 安全待辦（非腳本，這台 VPS 的）
+## 7. Roadmap（優先級建議）
+
+1. ~~Sub2API 傻瓜式部署（v1.1 已交付）~~
+2. **裝機計數器**（kejilion 的 496,211 次同款）：`grep -c 'GET /x ' /var/log/nginx/oece-x.access.log` 起步
+3. **`x` 快捷命令**：腳本首跑時問「安裝快捷方式？」→ 寫 `/usr/local/bin/x`
+4. 更多回程節點（成都/教育網）+ IPv6 路由 + 結果導出 Markdown
+5. Sub2API 可選一鍵 HTTPS（Caddy）
+6. **oece-x.sh 域名決策**：不必需；要品牌質感再買
+7. Ookla / iperf3 自建節點模式
+
+---
+
+## 8. 安全待辦（非腳本，這台 VPS 的）
 
 - [ ] **Docker 繞過 ufw**：sub2api 的 8080 是 `0.0.0.0` 發佈，全網可直連（nginx 反代形同虛設的防護）。建議 compose 裡改綁 `127.0.0.1:8080:8080`，或上 ufw-docker
 - [ ] 10 個安全更新未裝：`apt update && apt upgrade`
