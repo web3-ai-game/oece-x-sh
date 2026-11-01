@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck -S warning oece-x.sh
+      - name: bash syntax
+        run: bash -n oece-x.sh
+      - name: public surface scan
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            '167\.172\.87\.129|188\.166\.228\.59|157\.230\.|R2ltY29tMTIz|id_ed25519_do|ADMIN_HASH|sshpass|tanyl@macbook|/opt/oece-x-web|DO-vps-one|setup-ssh-key|deploy-all\.sh' \
+            --exclude-dir=.git .; then
+            echo "sensitive marker found" >&2
+            exit 1
+          fi
+          bash oece-x.sh --version
+          bash oece-x.sh --lang en --demo --audit --json >/dev/null
+          bash oece-x.sh --lang zh-Hant --demo --audit >/dev/null
